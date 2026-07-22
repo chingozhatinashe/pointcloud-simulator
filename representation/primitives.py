@@ -47,8 +47,7 @@ class WallSegment:
     def __post_init__(self) -> None:
         if self.junction_start == self.junction_end:
             raise ValueError(
-                f"WallSegment {self.id} cannot connect junction "
-                f"{self.junction_start} to itself"
+                f"WallSegment {self.id} cannot connect junction {self.junction_start} to itself"
             )
 
     def as_array(self, junctions: dict[int, Junction]) -> jnp.ndarray:
