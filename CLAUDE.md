@@ -51,6 +51,7 @@ bim_inference/
 │   └── tests/
 │       ├── __init__.py
 │       ├── test_ray_caster.py
+│       ├── test_scanner.py
 │       ├── test_noise_model.py
 │       ├── test_engine.py
 │       └── test_calibration.py
