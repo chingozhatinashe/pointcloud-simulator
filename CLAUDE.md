@@ -37,8 +37,8 @@ bim_inference/
 │       ├── __init__.py
 │       ├── test_primitives.py
 │       ├── test_floor_plan.py
-│       ├── test_constraints.py
-│       └── test_visualisation.py
+│       ├── test_building.py
+│       └── test_constraints.py
 │
 ├── simulator/                         # Component 2 — forward model
 │   ├── __init__.py
