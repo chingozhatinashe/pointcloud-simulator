@@ -112,6 +112,7 @@ bim_inference/
 │   │   └── optimiser.py              # Gradient-based junction position optimisation via optax
 │   └── tests/
 │       ├── __init__.py
+│       ├── test_config.py
 │       ├── test_prior.py
 │       ├── test_likelihood.py
 │       ├── test_rjmcmc.py
