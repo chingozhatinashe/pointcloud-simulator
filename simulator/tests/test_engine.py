@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -193,6 +198,50 @@ class TestSimulateDifferentiableMode:
         )
         assert result.slices[0].points.shape == (32, 2)
         assert bool(jnp.all(jnp.isfinite(result.slices[0].points)))
+
+
+class TestFloorPointCloudPlot:
+    @pytest.fixture(autouse=True)
+    def _close_figures(self):
+        yield
+        plt.close("all")
+
+    def test_mode_3d_returns_axes(self):
+        room = _square_room(size=2.0)
+        result = simulate(
+            room, jnp.array([[1.0, 1.0]]), [1.0], ZERO_NOISE, jax.random.PRNGKey(0), num_rays=16
+        )
+        ax = result.plot(room, mode="3d")
+        assert ax.name == "3d"
+
+    def test_mode_slices_returns_figure_with_one_axes_per_slice(self):
+        room = _square_room(size=2.0)
+        result = simulate(
+            room,
+            jnp.array([[1.0, 1.0]]),
+            [0.3, 1.0, 1.8],
+            ZERO_NOISE,
+            jax.random.PRNGKey(0),
+            num_rays=16,
+        )
+        fig = result.plot(room, mode="slices")
+        assert len(fig.axes) == 3
+
+    def test_mode_coverage_returns_axes(self):
+        room = _square_room(size=2.0)
+        result = simulate(
+            room, jnp.array([[1.0, 1.0]]), [1.0], ZERO_NOISE, jax.random.PRNGKey(0), num_rays=16
+        )
+        ax = result.plot(room, mode="coverage")
+        assert ax.name == "rectilinear"
+
+    def test_unknown_mode_raises(self):
+        room = _square_room(size=2.0)
+        result = simulate(
+            room, jnp.array([[1.0, 1.0]]), [1.0], ZERO_NOISE, jax.random.PRNGKey(0), num_rays=16
+        )
+        with pytest.raises(ValueError):
+            result.plot(room, mode="bogus")
 
 
 class TestSimulateSegments:

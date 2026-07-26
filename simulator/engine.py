@@ -50,6 +50,22 @@ class FloorPointCloud:
     scanner_positions: jnp.ndarray  # shape (M, 2)
     floor_plan_bounds: jnp.ndarray  # shape (4,) — bounding box (x_min, y_min, x_max, y_max)
 
+    def plot(self, floor_plan: FloorPlanGraph, mode: str = "3d", **kwargs):
+        """Dispatch to simulator.visualisation: mode is "3d", "slices", or "coverage".
+
+        Imported lazily to avoid a circular import (visualisation.py imports
+        `FloorPointCloud` from this module for type hints).
+        """
+        from simulator import visualisation
+
+        if mode == "3d":
+            return visualisation.plot_3d(self, floor_plan, **kwargs)
+        if mode == "slices":
+            return visualisation.plot_slices(self, floor_plan, **kwargs)
+        if mode == "coverage":
+            return visualisation.plot_coverage_heatmap(self.points_3d[:, :2], floor_plan, **kwargs)
+        raise ValueError(f"Unknown plot mode: {mode!r}")
+
 
 def _floor_plan_bounds(floor_plan: FloorPlanGraph) -> jnp.ndarray:
     positions = jnp.stack([junction.position for junction in floor_plan.junctions.values()])
