@@ -21,6 +21,7 @@ dependencies = [
     "flax",
     "blackjax",
     "tqdm",
+    "pye57>=0.4.19",
 ]
 
 [project.optional-dependencies]
