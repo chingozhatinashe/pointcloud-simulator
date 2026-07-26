@@ -113,6 +113,7 @@ bim_inference/
 │   └── tests/
 │       ├── __init__.py
 │       ├── test_config.py
+│       ├── test_result.py
 │       ├── test_prior.py
 │       ├── test_likelihood.py
 │       ├── test_rjmcmc.py
