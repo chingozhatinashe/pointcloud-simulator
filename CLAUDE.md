@@ -67,7 +67,7 @@ bim_inference/
 │   ├── normalisation.py               # Coordinate frame normalisation and transform storage
 │   ├── synthetic.py                   # DatasetGenerator, SyntheticDataset (HDF5-backed)
 │   ├── validation.py                  # ValidationReport and data quality checks
-│   ├── datasets/                      # Benchmark dataset wrappers
+│   ├── datasets/                       # Benchmark dataset wrappers
 │   │   ├── __init__.py
 │   │   ├── scannet.py                 # ScanNet loader and ground truth extractor
 │   │   ├── matterport.py             # Matterport3D loader
@@ -113,7 +113,6 @@ bim_inference/
 │   └── tests/
 │       ├── __init__.py
 │       ├── test_config.py
-│       ├── test_result.py
 │       ├── test_prior.py
 │       ├── test_likelihood.py
 │       ├── test_rjmcmc.py
