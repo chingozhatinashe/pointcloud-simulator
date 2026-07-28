@@ -77,9 +77,7 @@ class TestPointLogProb:
     def test_matches_mixture_formula_at_zero_distance(self):
         params = AnalyticalLikelihoodParams(wall_distance_sigma=0.1, inlier_weight=0.9)
         clutter_density = 0.25
-        expected = jnp.log(
-            0.9 / (0.1 * jnp.sqrt(2 * jnp.pi)) + 0.1 * clutter_density
-        )
+        expected = jnp.log(0.9 / (0.1 * jnp.sqrt(2 * jnp.pi)) + 0.1 * clutter_density)
         actual = point_log_prob(jnp.array([0.0]), params, clutter_density)
         assert actual[0] == pytest.approx(float(expected), abs=1e-6)
 
@@ -212,7 +210,11 @@ class TestSimulatorLikelihood:
         )
         expected_distance = chamfer_distance(
             simulate(
-                floor_plan, config.scanner_positions, [1.0], config.noise_model, jax.random.PRNGKey(9)
+                floor_plan,
+                config.scanner_positions,
+                [1.0],
+                config.noise_model,
+                jax.random.PRNGKey(9),
             ),
             observed,
         )
@@ -233,7 +235,10 @@ class TestSimulatorLikelihood:
         floor_plans = [_square_room(2.0), _square_room(2.2)]
         config = self._config()
         observed = simulate(
-            _square_room(2.0), config.scanner_positions, [1.0], config.noise_model,
+            _square_room(2.0),
+            config.scanner_positions,
+            [1.0],
+            config.noise_model,
             jax.random.PRNGKey(7),
         )
 
