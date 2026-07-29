@@ -207,7 +207,96 @@ argument, with `r` recovered from the pair being merged via `M⁻¹`:
 
 ---
 
-## 5. Open items before implementation
+## 5. Full algorithm pseudo-code
+
+```
+function RJMCMC(D, prior, likelihood, config, rng_key):
+    G ← config.init_graph ?? prior.sample(rng_key)      # e.g. MAP/SBI warm-start, or prior draw
+    samples ← []
+    diagnostics ← { move: {proposed: 0, accepted: 0} for move in MOVE_TYPES }
+
+    for t in 1 .. config.n_iterations:
+        move ← sample_categorical(rng_key, config.move_probs)
+            # MOVE_TYPES = {SEGMENT_BIRTH, SEGMENT_DEATH, JUNCTION_PERTURB,
+            #               SEGMENT_PERTURB, JUNCTION_SPLIT, JUNCTION_MERGE}
+            # probabilities configurable, sum to 1
+        diagnostics[move].proposed += 1
+        k ← |G.junctions|                                # current Nj
+
+        # ---- within-model moves: Nj fixed, no Jacobian ----------------------
+
+        case SEGMENT_BIRTH:
+            (j_a, j_b) ← sample_uniform_pair(G.junctions)
+            G' ← G.add_segment(j_a, j_b)
+            if not G'.is_planar(): reject; continue      # planarity check, docs/inference.md:165
+            α ← min(1, [P(D|G')P(G')]/[P(D|G)P(G)] · [d_birth/b_death] · [1/N_pairs(G)])
+                # N_pairs(G): number of eligible (non-adjacent, planar) junction pairs
+
+        case SEGMENT_DEATH:
+            ℓ ← sample_uniform(G.segments)
+            G' ← G.remove_segment(ℓ)
+            α ← min(1, [P(D|G')P(G')]/[P(D|G)P(G)] · [b_death/d_birth] · [N_pairs(G')/1])
+                # reciprocal of birth; standard MH, no Jacobian
+
+        case JUNCTION_PERTURB:
+            j ← sample_uniform(G.junctions)
+            δ ← N(0, σ_perturb² I)
+            G' ← G.move_junction(j, j.position + δ)
+            α ← min(1, [P(D|G')P(G')]/[P(D|G)P(G)])       # symmetric proposal, cancels
+
+        case SEGMENT_PERTURB:
+            ℓ ← sample_uniform(G.segments)
+            Δφ ← N(0, σ_rot²)
+            G' ← rotate_segment(G, ℓ, Δφ)                 # updates ℓ's junction positions
+            α ← min(1, [P(D|G')P(G')]/[P(D|G)P(G)] · proposal_ratio)
+
+        # ---- between-model moves: Nj changes, Jacobian required --------------
+
+        case JUNCTION_SPLIT:
+            j ← sample_uniform(G.junctions)               # probability 1/k
+            r ← q_r(rng_key); θ ← Uniform(0, 2π)
+            G' ← G.split_junction(j, direction = r·(cos θ, sin θ))
+                # realises M(p, r, θ) = (p + r(cosθ,sinθ), p - r(cosθ,sinθ)); §3
+            α ← min(1, [P(D|G')P(G')]/[P(D|G)P(G)] · [8π·r·k·d_merge]/[b_split·M_{k+1}·q_r(r)])
+
+        case JUNCTION_MERGE:
+            (a, b) ← sample_pair_within_threshold(G.junctions)   # probability 1/M_k
+            (r, θ) ← M⁻¹(a.position, b.position)                 # recovered, §3
+            G' ← G.merge_junctions(a, b)
+            α ← min(1, [P(D|G)P(G)]/[P(D|G')P(G')] · [b_split·M_k·q_r(r)]/[8π·r·(k-1)·d_merge])
+
+        # ---- accept/reject -----------------------------------------------------
+
+        u ← Uniform(0, 1)
+        if u < α:
+            G ← G'
+            diagnostics[move].accepted += 1
+
+        # ---- Gibbs-within-RJMCMC: refresh junction positions given fixed topology --
+
+        if t mod config.gibbs_interval == 0:
+            for j in G.junctions:
+                G.junctions[j].position ← sample from conditional Gaussian posterior
+                    (closed form under the analytical likelihood, topology E held fixed)
+
+        # ---- record ----------------------------------------------------------------
+
+        record log_posterior(G), n_segments(G) to diagnostics
+        if t > config.burn_in and t mod config.thinning == 0:
+            samples.append(copy(G))
+
+    return samples, diagnostics
+```
+
+This directly instantiates the move classification (§2) and the split/merge ratios (§4);
+`d_birth`, `b_death`, `b_split`, `d_merge` are the configurable per-move proposal
+probabilities from `config.move_probs`, and `N_pairs(G)`, `M_k` are the eligible-candidate
+counts used to make the birth/death and split/merge proposals uniform over their
+respective candidate sets.
+
+---
+
+## 6. Open items before implementation
 
 - **`q_r(·)` must be chosen and implemented.** `SPLIT_OFFSET` currently hard-codes the
   offset radius in `split_junction`; it should instead parameterise a proposal distribution
@@ -218,3 +307,10 @@ argument, with `r` recovered from the pair being merged via `M⁻¹`:
 - **`docs/inference.md`'s move descriptions for split/merge** should be updated once the
   above is implemented, to reference `q_r` instead of the fixed `SPLIT_OFFSET`, mirroring
   the fix already made to the segment birth/death descriptions.
+
+---
+
+## 7. References
+
+Green, P. J. (1995). Reversible jump Markov chain Monte Carlo computation and Bayesian
+model determination. *Biometrika*, 82(4), 711–732. https://doi.org/10.1093/biomet/82.4.711
