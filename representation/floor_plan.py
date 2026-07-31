@@ -45,6 +45,22 @@ class FloorPlanGraph:
         self._next_junction_id = 0
         self._next_segment_id = 0
 
+    def copy(self) -> FloorPlanGraph:
+        """A copy safe for non-destructive trial mutation (e.g. RJMCMC proposals,
+        which must be able to discard a rejected candidate and keep the original).
+
+        Every mutating method on this class replaces `Junction`/`WallSegment`
+        entries wholesale rather than mutating them in place, so copying the two
+        id-keyed dicts is sufficient -- the entries themselves never need a deep
+        copy.
+        """
+        new = FloorPlanGraph()
+        new.junctions = dict(self.junctions)
+        new.segments = dict(self.segments)
+        new._next_junction_id = self._next_junction_id
+        new._next_segment_id = self._next_segment_id
+        return new
+
     # --- construction and mutation -----------------------------------
 
     def add_junction(self, position) -> Junction:
