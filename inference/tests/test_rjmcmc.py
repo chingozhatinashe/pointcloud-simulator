@@ -1,5 +1,5 @@
-"""Tests for the within-model RJMCMC moves: inference.rjmcmc.proposals and
-inference.rjmcmc.kernel, per docs/inference/rjmcmc_algorithm.md sections 2 and 6.
+"""Tests for the RJMCMC moves: inference.rjmcmc.proposals and
+inference.rjmcmc.kernel, per docs/inference/rjmcmc_algorithm.md sections 2-4 and 6.
 """
 
 from __future__ import annotations
@@ -20,7 +20,12 @@ from inference.rjmcmc.kernel import (
 )
 from inference.rjmcmc.proposals import (
     _non_adjacent_pairs,
+    _pairs_within_threshold,
+    _sample_split_radius,
+    _split_radius_log_pdf,
+    propose_junction_merge,
     propose_junction_perturbation,
+    propose_junction_split,
     propose_segment_birth,
     propose_segment_death,
     propose_segment_perturbation,
@@ -269,7 +274,12 @@ class TestRJMCMCConfig:
 class TestSampleMoveType:
     def test_forced_move_type_is_always_selected(self):
         config = RJMCMCConfig(
-            p_segment_birth=1.0, p_segment_death=0.0, p_junction_perturb=0.0, p_segment_perturb=0.0
+            p_segment_birth=1.0,
+            p_segment_death=0.0,
+            p_junction_perturb=0.0,
+            p_segment_perturb=0.0,
+            p_junction_split=0.0,
+            p_junction_merge=0.0,
         )
         for key in range(10):
             assert _sample_move_type(config, jax.random.PRNGKey(key)) is MoveType.SEGMENT_BIRTH
@@ -287,7 +297,12 @@ class TestStep:
     def test_unproposable_move_is_an_automatic_reject(self):
         graph = FloorPlanGraph()  # no junctions or segments at all
         config = RJMCMCConfig(
-            p_segment_birth=0.0, p_segment_death=1.0, p_junction_perturb=0.0, p_segment_perturb=0.0
+            p_segment_birth=0.0,
+            p_segment_death=1.0,
+            p_junction_perturb=0.0,
+            p_segment_perturb=0.0,
+            p_junction_split=0.0,
+            p_junction_merge=0.0,
         )
         result = step(
             graph, _empty_cloud(), _ConstantLikelihood(0.0), NO_PRIOR, config, jax.random.PRNGKey(0)
@@ -300,7 +315,12 @@ class TestStep:
     def test_neutral_posterior_symmetric_move_always_accepted(self):
         room = _square_room()
         config = RJMCMCConfig(
-            p_segment_birth=0.0, p_segment_death=0.0, p_junction_perturb=1.0, p_segment_perturb=0.0
+            p_segment_birth=0.0,
+            p_segment_death=0.0,
+            p_junction_perturb=1.0,
+            p_segment_perturb=0.0,
+            p_junction_split=0.0,
+            p_junction_merge=0.0,
         )
         for key in range(10):
             result = step(
@@ -318,7 +338,12 @@ class TestStep:
     def test_proposal_always_worse_is_always_rejected(self):
         room = _square_room()
         config = RJMCMCConfig(
-            p_segment_birth=0.0, p_segment_death=0.0, p_junction_perturb=1.0, p_segment_perturb=0.0
+            p_segment_birth=0.0,
+            p_segment_death=0.0,
+            p_junction_perturb=1.0,
+            p_segment_perturb=0.0,
+            p_junction_split=0.0,
+            p_junction_merge=0.0,
         )
         likelihood = _RejectsCopiesLikelihood(room)
         for key in range(10):
@@ -326,4 +351,230 @@ class TestStep:
                 room, _empty_cloud(), likelihood, NO_PRIOR, config, jax.random.PRNGKey(key)
             )
             assert result.accepted is False
-            assert result.graph is room
+
+
+# --- proposals.py: junction split / merge -----------------------------------------
+
+SPLIT_RADIUS_MEAN = 0.05
+MERGE_DISTANCE_THRESHOLD = 0.2
+R_MAX = MERGE_DISTANCE_THRESHOLD / 2.0
+
+
+def _lone_junction() -> FloorPlanGraph:
+    graph = FloorPlanGraph()
+    graph.add_junction((0.0, 0.0))
+    return graph
+
+
+class TestPairsWithinThreshold:
+    def test_filters_by_distance(self):
+        graph = FloorPlanGraph()
+        a = graph.add_junction((0.0, 0.0))
+        b = graph.add_junction((0.05, 0.0))  # within threshold
+        c = graph.add_junction((5.0, 0.0))  # far outside threshold
+        pairs = _pairs_within_threshold(graph, MERGE_DISTANCE_THRESHOLD)
+        assert pairs == [(a.id, b.id)]
+        assert (a.id, c.id) not in pairs
+        assert (b.id, c.id) not in pairs
+
+    def test_does_not_require_an_existing_segment(self):
+        graph = FloorPlanGraph()
+        a = graph.add_junction((0.0, 0.0))
+        b = graph.add_junction((0.05, 0.0))
+        # no segment added between a and b
+        assert _pairs_within_threshold(graph, MERGE_DISTANCE_THRESHOLD) == [(a.id, b.id)]
+
+
+class TestSplitRadius:
+    def test_sampled_radius_is_always_within_support(self):
+        for key in range(200):
+            r = _sample_split_radius(SPLIT_RADIUS_MEAN, R_MAX, jax.random.PRNGKey(key))
+            assert 0.0 < r < R_MAX
+
+    def test_log_pdf_matches_truncated_exponential_formula(self):
+        r = 0.03
+        rate = 1.0 / SPLIT_RADIUS_MEAN
+        max_cdf = 1.0 - np.exp(-rate * R_MAX)
+        expected = np.log(rate) - rate * r - np.log(max_cdf)
+        assert _split_radius_log_pdf(r, SPLIT_RADIUS_MEAN, R_MAX) == pytest.approx(expected)
+
+    def test_log_pdf_decreases_with_radius(self):
+        low = _split_radius_log_pdf(0.01, SPLIT_RADIUS_MEAN, R_MAX)
+        high = _split_radius_log_pdf(0.08, SPLIT_RADIUS_MEAN, R_MAX)
+        assert low > high
+
+
+class TestProposeJunctionSplit:
+    def test_returns_none_with_no_junctions(self):
+        graph = FloorPlanGraph()
+        proposal = propose_junction_split(
+            graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(0)
+        )
+        assert proposal is None
+
+    def test_splits_a_lone_junction_into_two_within_threshold(self):
+        graph = _lone_junction()
+        for key in range(20):
+            proposal = propose_junction_split(
+                graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(key)
+            )
+            assert proposal is not None  # always planar: at most one segment ever exists
+            assert len(proposal.graph.junctions) == 2
+            assert len(proposal.graph.segments) == 1
+
+            positions = [j.position for j in proposal.graph.junctions.values()]
+            separation = float(jnp.linalg.norm(positions[0] - positions[1]))
+            assert 0.0 < separation < MERGE_DISTANCE_THRESHOLD
+
+    def test_does_not_mutate_original_graph(self):
+        graph = _lone_junction()
+        propose_junction_split(
+            graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(0)
+        )
+        assert len(graph.junctions) == 1
+        assert len(graph.segments) == 0
+
+
+class TestProposeJunctionMerge:
+    def test_returns_none_with_no_candidate_pair(self):
+        graph = FloorPlanGraph()
+        graph.add_junction((0.0, 0.0))
+        graph.add_junction((5.0, 0.0))  # far outside merge_distance_threshold
+        proposal = propose_junction_merge(
+            graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(0)
+        )
+        assert proposal is None
+
+    def test_merges_to_the_midpoint(self):
+        graph = FloorPlanGraph()
+        a = graph.add_junction((0.0, 0.0))
+        graph.add_junction((0.06, 0.0))
+        proposal = propose_junction_merge(
+            graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(0)
+        )
+        assert proposal is not None
+        assert len(proposal.graph.junctions) == 1
+        merged = next(iter(proposal.graph.junctions.values()))
+        assert jnp.allclose(merged.position, jnp.array([0.03, 0.0]), atol=1e-5)
+        assert merged.id == a.id  # merge_junctions keeps id_a, per representation.floor_plan
+
+    def test_does_not_mutate_original_graph(self):
+        graph = FloorPlanGraph()
+        graph.add_junction((0.0, 0.0))
+        graph.add_junction((0.06, 0.0))
+        propose_junction_merge(
+            graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(0)
+        )
+        assert len(graph.junctions) == 2
+
+
+class TestSplitMergeRoundTrip:
+    """The core correctness property from docs/inference/rjmcmc_algorithm.md section 3:
+    merge is the exact inverse of split, so their log_proposal_ratio values (which each
+    fold in the Jacobian, section 4) must be exact negatives of one another.
+    """
+
+    def test_log_proposal_ratios_are_exact_negatives(self):
+        graph = _lone_junction()
+        split_proposal = propose_junction_split(
+            graph, SPLIT_RADIUS_MEAN, MERGE_DISTANCE_THRESHOLD, jax.random.PRNGKey(0)
+        )
+        assert split_proposal is not None
+        assert len(split_proposal.graph.junctions) == 2
+
+        # A different key on purpose: with only one candidate pair to merge, the
+        # choice is forced regardless of key -- this is exactly the reverse move.
+        merge_proposal = propose_junction_merge(
+            split_proposal.graph,
+            SPLIT_RADIUS_MEAN,
+            MERGE_DISTANCE_THRESHOLD,
+            jax.random.PRNGKey(999),
+        )
+        assert merge_proposal is not None
+        assert len(merge_proposal.graph.junctions) == 1
+
+        assert merge_proposal.log_proposal_ratio == pytest.approx(
+            -split_proposal.log_proposal_ratio, rel=1e-4
+        )
+
+        recovered_position = next(iter(merge_proposal.graph.junctions.values())).position
+        assert jnp.allclose(recovered_position, jnp.array([0.0, 0.0]), atol=1e-5)
+
+
+class TestSplitMergeKernelWiring:
+    # Both directions must have positive probability -- if the reverse move's
+    # probability were 0, `step` correctly forces log_acceptance_ratio = -inf
+    # (accepting a move whose reverse can never be proposed would break
+    # reversibility), so a "split-only" config isn't a meaningful test of the
+    # split path specifically. Both nonzero lets `_sample_move_type` pick either.
+    _SPLIT_ONLY = RJMCMCConfig(
+        p_segment_birth=0.0,
+        p_segment_death=0.0,
+        p_junction_perturb=0.0,
+        p_segment_perturb=0.0,
+        p_junction_split=1.0,
+        p_junction_merge=0.0,
+    )
+    _SPLIT_AND_MERGE = RJMCMCConfig(
+        p_segment_birth=0.0,
+        p_segment_death=0.0,
+        p_junction_perturb=0.0,
+        p_segment_perturb=0.0,
+        p_junction_split=0.5,
+        p_junction_merge=0.5,
+    )
+
+    def test_forced_split_move_type_is_always_selected(self):
+        for key in range(10):
+            assert (
+                _sample_move_type(self._SPLIT_ONLY, jax.random.PRNGKey(key))
+                is MoveType.JUNCTION_SPLIT
+            )
+
+    def test_step_split_either_accepts_to_two_junctions_or_rejects(self):
+        graph = _lone_junction()
+        saw_split = False
+        for key in range(40):
+            result = step(
+                graph,
+                _empty_cloud(),
+                _ConstantLikelihood(0.0),
+                NO_PRIOR,
+                self._SPLIT_AND_MERGE,
+                jax.random.PRNGKey(key),
+            )
+            assert isinstance(result, StepResult)
+            if result.move_type is not MoveType.JUNCTION_SPLIT:
+                continue
+            saw_split = True
+            assert np.isfinite(result.log_acceptance_ratio)
+            if result.accepted:
+                assert len(result.graph.junctions) == 2
+            else:
+                assert result.graph is graph
+        assert saw_split  # sanity check the loop actually exercised the split path
+
+    def test_step_merge_either_accepts_to_one_junction_or_rejects(self):
+        graph = FloorPlanGraph()
+        graph.add_junction((0.0, 0.0))
+        graph.add_junction((0.06, 0.0))
+        saw_merge = False
+        for key in range(40):
+            result = step(
+                graph,
+                _empty_cloud(),
+                _ConstantLikelihood(0.0),
+                NO_PRIOR,
+                self._SPLIT_AND_MERGE,
+                jax.random.PRNGKey(key),
+            )
+            assert isinstance(result, StepResult)
+            if result.move_type is not MoveType.JUNCTION_MERGE:
+                continue
+            saw_merge = True
+            assert np.isfinite(result.log_acceptance_ratio)
+            if result.accepted:
+                assert len(result.graph.junctions) == 1
+            else:
+                assert result.graph is graph
+        assert saw_merge  # sanity check the loop actually exercised the merge path

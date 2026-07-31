@@ -109,7 +109,7 @@ class TestMergeAndSplit:
         graph.add_segment(center.id, left.id)
         graph.add_segment(center.id, right.id)
 
-        junction_a, junction_b = graph.split_junction(center.id, direction=(1.0, 0.0))
+        junction_a, junction_b = graph.split_junction(center.id, offset=(1.0, 0.0))
 
         assert center.id not in graph.junctions
         assert junction_a.id in graph.junctions
@@ -129,7 +129,7 @@ class TestMergeAndSplit:
         graph.add_segment(center.id, left.id)
         graph.add_segment(center.id, right.id)
 
-        junction_a, junction_b = graph.split_junction(center.id, direction=(1.0, 0.0))
+        junction_a, junction_b = graph.split_junction(center.id, offset=(1.0, 0.0))
 
         left_segment = next(
             s for s in graph.segments.values() if left.id in (s.junction_start, s.junction_end)
@@ -140,11 +140,11 @@ class TestMergeAndSplit:
         assert junction_b.id in (left_segment.junction_start, left_segment.junction_end)
         assert junction_a.id in (right_segment.junction_start, right_segment.junction_end)
 
-    def test_split_junction_rejects_zero_direction(self):
+    def test_split_junction_rejects_zero_offset(self):
         graph = FloorPlanGraph()
         center = graph.add_junction((0.0, 0.0))
         with pytest.raises(ValueError):
-            graph.split_junction(center.id, direction=(0.0, 0.0))
+            graph.split_junction(center.id, offset=(0.0, 0.0))
 
 
 class TestGeometricQueries:

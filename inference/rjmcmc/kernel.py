@@ -2,16 +2,19 @@
 Metropolis-Hastings acceptance ratio, and accepts or rejects one move per `step`
 call, per docs/inference/rjmcmc_algorithm.md section 6.
 
-Implements the four **within-model** moves only -- segment birth/death and
-junction/segment perturbation. These need no dimension-matching Jacobian since
-`Nj` is unchanged (section 2); the acceptance ratio is
+Implements all six moves: segment birth/death and junction/segment perturbation
+(within-model, section 2) plus junction split/merge (between-model, sections
+3-4). The acceptance ratio is uniformly
 
     [likelihood ratio] x [prior ratio] x [move-type-selection ratio]
         x [Proposal.log_proposal_ratio from the move itself]
 
-Junction split/merge (the between-model moves needing the Jacobian derived in
-sections 3-4) and the Gibbs junction-position refresh (section 5) are not yet
-implemented -- see section 7's open items.
+for every move type -- the dimension-matching Jacobian split/merge need is
+folded into their own `log_proposal_ratio` by `inference.rjmcmc.proposals`
+(section 3), so `step` itself needs no special-casing per move.
+
+The Gibbs junction-position refresh (section 5) is not yet implemented -- see
+section 7's open items.
 """
 
 from __future__ import annotations
@@ -28,7 +31,9 @@ from inference.likelihood import LikelihoodModel
 from inference.prior import log_prob as prior_log_prob
 from inference.rjmcmc.proposals import (
     Proposal,
+    propose_junction_merge,
     propose_junction_perturbation,
+    propose_junction_split,
     propose_segment_birth,
     propose_segment_death,
     propose_segment_perturbation,
@@ -42,6 +47,8 @@ class MoveType(enum.Enum):
     SEGMENT_DEATH = "segment_death"
     JUNCTION_PERTURB = "junction_perturb"
     SEGMENT_PERTURB = "segment_perturb"
+    JUNCTION_SPLIT = "junction_split"
+    JUNCTION_MERGE = "junction_merge"
 
 
 _REVERSE_MOVE = {
@@ -49,22 +56,29 @@ _REVERSE_MOVE = {
     MoveType.SEGMENT_DEATH: MoveType.SEGMENT_BIRTH,
     MoveType.JUNCTION_PERTURB: MoveType.JUNCTION_PERTURB,
     MoveType.SEGMENT_PERTURB: MoveType.SEGMENT_PERTURB,
+    MoveType.JUNCTION_SPLIT: MoveType.JUNCTION_MERGE,
+    MoveType.JUNCTION_MERGE: MoveType.JUNCTION_SPLIT,
 }
 
 
 @dataclass(frozen=True)
 class RJMCMCConfig:
-    """Move-selection probabilities (must sum to 1 across the four implemented
-    move types) and step sizes for the within-model moves.
+    """Move-selection probabilities (must sum to 1 across all six move types)
+    and step sizes for every move.
     """
 
-    p_segment_birth: float = 0.25
-    p_segment_death: float = 0.25
-    p_junction_perturb: float = 0.25
-    p_segment_perturb: float = 0.25
+    p_segment_birth: float = 0.2
+    p_segment_death: float = 0.2
+    p_junction_perturb: float = 0.2
+    p_segment_perturb: float = 0.2
+    p_junction_split: float = 0.1
+    p_junction_merge: float = 0.1
 
     junction_perturb_sigma: float = 0.05  # metres
     segment_perturb_sigma: float = 0.05  # radians
+
+    split_radius_mean: float = 0.05  # metres -- mean of q_r, the split-offset proposal
+    merge_distance_threshold: float = 0.2  # metres -- max distance for a mergeable pair
 
     def __post_init__(self) -> None:
         for name in (
@@ -72,6 +86,8 @@ class RJMCMCConfig:
             "p_segment_death",
             "p_junction_perturb",
             "p_segment_perturb",
+            "p_junction_split",
+            "p_junction_merge",
         ):
             value = getattr(self, name)
             if value < 0:
@@ -81,6 +97,8 @@ class RJMCMCConfig:
             + self.p_segment_death
             + self.p_junction_perturb
             + self.p_segment_perturb
+            + self.p_junction_split
+            + self.p_junction_merge
         )
         if not np.isclose(total, 1.0):
             raise ValueError(f"move probabilities must sum to 1, got {total}")
@@ -92,6 +110,12 @@ class RJMCMCConfig:
             raise ValueError(
                 f"segment_perturb_sigma must be positive, got {self.segment_perturb_sigma}"
             )
+        if self.split_radius_mean <= 0:
+            raise ValueError(f"split_radius_mean must be positive, got {self.split_radius_mean}")
+        if self.merge_distance_threshold <= 0:
+            raise ValueError(
+                f"merge_distance_threshold must be positive, got {self.merge_distance_threshold}"
+            )
 
     def move_probability(self, move_type: MoveType) -> float:
         return {
@@ -99,6 +123,8 @@ class RJMCMCConfig:
             MoveType.SEGMENT_DEATH: self.p_segment_death,
             MoveType.JUNCTION_PERTURB: self.p_junction_perturb,
             MoveType.SEGMENT_PERTURB: self.p_segment_perturb,
+            MoveType.JUNCTION_SPLIT: self.p_junction_split,
+            MoveType.JUNCTION_MERGE: self.p_junction_merge,
         }[move_type]
 
 
@@ -118,6 +144,12 @@ _PROPOSE = {
     ),
     MoveType.SEGMENT_PERTURB: lambda graph, config, key: propose_segment_perturbation(
         graph, config.segment_perturb_sigma, key
+    ),
+    MoveType.JUNCTION_SPLIT: lambda graph, config, key: propose_junction_split(
+        graph, config.split_radius_mean, config.merge_distance_threshold, key
+    ),
+    MoveType.JUNCTION_MERGE: lambda graph, config, key: propose_junction_merge(
+        graph, config.split_radius_mean, config.merge_distance_threshold, key
     ),
 }
 
@@ -147,8 +179,8 @@ def step(
     config: RJMCMCConfig,
     rng_key: jax.random.PRNGKey,
 ) -> StepResult:
-    """One RJMCMC iteration: propose one within-model move, compute the
-    Metropolis-Hastings acceptance ratio, and accept or reject it.
+    """One RJMCMC iteration: propose one move, compute the Metropolis-Hastings
+    acceptance ratio, and accept or reject it.
     """
     move_key, propose_key, accept_key = jax.random.split(rng_key, 3)
     move_type = _sample_move_type(config, move_key)
