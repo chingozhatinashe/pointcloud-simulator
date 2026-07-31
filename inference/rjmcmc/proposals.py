@@ -119,6 +119,11 @@ def propose_junction_perturbation(
     """Move a uniformly-chosen junction by `delta ~ N(0, sigma^2 I)`.
 
     Symmetric random walk in position -- `log_proposal_ratio` is exactly 0.
+    Rejected (returns `None`) if moving the junction crosses it through an
+    unrelated wall -- neither `P(D|G)` nor `P(G)` penalises non-planarity
+    (that's a hard constraint on `FloorPlanGraph.is_valid()`, not a smooth prior
+    term), so without this check a non-planar proposal would be scored no
+    differently from a planar one and could be accepted outright.
     """
     junction_ids = sorted(floor_plan.junctions)
     if not junction_ids:
@@ -130,6 +135,8 @@ def propose_junction_perturbation(
     noise = jax.random.normal(noise_key, (2,)) * sigma
     proposed = floor_plan.copy()
     proposed.move_junction(junction_id, floor_plan.junctions[junction_id].position + noise)
+    if not proposed.is_planar():
+        return None
 
     return Proposal(graph=proposed, log_proposal_ratio=0.0)
 
@@ -146,6 +153,9 @@ def propose_segment_perturbation(
     the move, `delta_phi` and `-delta_phi` are equally likely under
     `N(0, sigma_rot^2)`, and the pivot is chosen identically (uniform over the
     segment's two junctions) forward and reverse -- so `log_proposal_ratio` is 0.
+    Rejected (returns `None`) if the rotation sweeps the free junction through an
+    unrelated wall -- see `propose_junction_perturbation` for why this check is
+    needed (neither `P(D|G)` nor `P(G)` penalises non-planarity on their own).
     """
     segment_ids = sorted(floor_plan.segments)
     if not segment_ids:
@@ -170,6 +180,8 @@ def propose_segment_perturbation(
 
     proposed = floor_plan.copy()
     proposed.move_junction(free_id, new_free_position)
+    if not proposed.is_planar():
+        return None
 
     return Proposal(graph=proposed, log_proposal_ratio=0.0)
 
