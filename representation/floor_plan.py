@@ -19,7 +19,6 @@ K_MAX = 128  # Maximum number of wall segments per floor plan
 J_MAX = 256  # Maximum number of junctions per floor plan
 
 MIN_SEGMENT_LENGTH = 0.1  # metres
-SPLIT_OFFSET = 0.05  # metres -- default junction separation on split
 
 
 def _point_to_segment_distance(point: jnp.ndarray, segment: jnp.ndarray) -> jnp.ndarray:
@@ -122,19 +121,25 @@ class FloorPlanGraph:
         del self.junctions[id_b]
         return self.junctions[id_a]
 
-    def split_junction(self, junction_id: int, direction) -> tuple[Junction, Junction]:
-        """Split a junction into two along `direction`, partitioning incident segments by
-        which side of the split their far endpoint falls on, and reconnecting the two new
-        junctions with a new segment."""
+    def split_junction(self, junction_id: int, offset) -> tuple[Junction, Junction]:
+        """Split a junction into two, at `origin +/- offset`, partitioning incident
+        segments by which side of the split their far endpoint falls on, and
+        reconnecting the two new junctions with a new segment.
+
+        `offset` is the full displacement vector -- its magnitude sets how far
+        apart the two new junctions land, its direction the split axis. See the
+        `M(p, r, theta)` mapping in docs/inference/rjmcmc_algorithm.md section 3;
+        callers doing RJMCMC split proposals pass `offset = r * (cos(theta), sin(theta))`
+        for a proposed radius `r` and angle `theta`.
+        """
         if junction_id not in self.junctions:
             raise KeyError(f"Junction {junction_id} does not exist")
         origin = self.junctions[junction_id]
-        direction = jnp.asarray(direction, dtype=jnp.float32)
-        norm = jnp.linalg.norm(direction)
+        offset = jnp.asarray(offset, dtype=jnp.float32)
+        norm = jnp.linalg.norm(offset)
         if norm == 0:
-            raise ValueError("Split direction must be non-zero")
-        unit = direction / norm
-        offset = SPLIT_OFFSET * unit
+            raise ValueError("Split offset must be non-zero")
+        unit = offset / norm
 
         incident_ids = self.incident_segments(junction_id)
 
