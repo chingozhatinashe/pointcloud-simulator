@@ -207,7 +207,171 @@ argument, with `r` recovered from the pair being merged via `M⁻¹`:
 
 ---
 
-## 5. Full algorithm pseudo-code
+## 5. Gibbs refresh of junction positions
+
+Section 2 classified junction perturbation as a within-model move that mixes slowly as a
+plain random walk. This section derives a much faster single-site conditional draw for it,
+and is explicit about what that draw approximates. Notation local to this section: `x_j`
+denotes a junction *position* (to avoid clashing with an observed data point `p`); `E` is
+the current edge set (topology fixed throughout this section).
+
+### 5.1 What is actually being sampled
+
+The target is the joint `p(θ | E, D)` over all junction positions at once, `θ = (x_1, …,
+x_{Nj}) ∈ ℝ^{2Nj}`. A single Gibbs step does **not** draw this joint. It draws one
+junction's position from its full conditional, holding every other junction fixed:
+
+```
+x_j | x_{-j}, E, D
+```
+
+A **sweep** (`for j in G.junctions: …`) updates every junction once, each conditioned on
+the current values of the others. Repeated sweeps form a Markov chain over `θ`; it is that
+chain's *stationary* distribution — not any individual step — that should equal
+`p(θ|E,D)`.
+
+### 5.2 Data augmentation needed for tractability
+
+The raw likelihood (`docs/inference.md:114-122`) is a Gaussian/uniform mixture with a
+`min`-over-segments distance, neither of which is Gaussian in a junction's position. Both
+are resolved by treating two per-point quantities as fixed for the duration of a sweep
+(standard data augmentation for a robust/mixture model, resampled elsewhere in the
+algorithm):
+
+- `z_p ∈ {inlier, clutter}` — which mixture component explains point `p`
+- `s_p` — which segment `p` is an inlier of (resolves the `min`)
+
+### 5.3 Per-point Gaussian contribution
+
+For segment `ℓ = (x_j, x_o)` (incident to `j`, far endpoint `x_o`) and an observed point
+`p`, `_point_to_segment_distance` (`floor_plan.py:25-36`) computes
+
+```
+t_p  = clip( (p − x_j)·(x_o − x_j) / |x_o − x_j|² , 0, 1 )
+proj = (1 − t_p) x_j + t_p x_o
+```
+
+`t_p` depends on `x_j`, which is the only source of nonlinearity. Freezing `t_p` at its
+current value (the same linearization ICP-style point-to-line registration uses) makes
+`proj` exactly linear in `x_j`, so the inlier log-likelihood term is exactly quadratic:
+
+```
+log N(d(p,ℓ); 0, σ_p²) = −|p − t_p x_o − (1−t_p) x_j|² / (2σ_p²) + const
+```
+
+Writing `y_p = p − t_p x_o` and `c_p = 1 − t_p`, point `p` is a Gaussian "vote" for `x_j`
+centred at `y_p / c_p` with precision `(c_p² / σ_p²) I₂`. `t_p=0` (foot lands at `j`)
+recovers a direct vote at `p`; `t_p=1` (foot lands at the far endpoint) contributes zero
+information about `x_j` (`c_p=0`) — both fall out of the formula with no special-casing.
+
+### 5.4 Closed-form single-site conditional
+
+Summing precisions and information vectors over every incident segment `ℓ ∈ N(j)` and
+every inlier point `p` assigned to it:
+
+```
+Λ_j = [ Σ_{ℓ∈N(j)} Σ_{p∈I_ℓ}  (1−t_p)² / σ_p² ]  I₂
+η_j =   Σ_{ℓ∈N(j)} Σ_{p∈I_ℓ}  [(1−t_p)/σ_p²] (p − t_p x_o(ℓ))
+
+x_j | x_{-j}, E, D, {z_p,s_p,t_p}  ~  N( μ_j, Σ_j ),   Σ_j = Λ_j⁻¹,   μ_j = Σ_j η_j
+```
+
+`μ_j` is exactly the weighted least-squares point-to-segment fit for `j` given the frozen
+correspondences; `Σ_j` is the resulting positional uncertainty.
+
+### 5.5 The joint is a Gaussian Markov Random Field
+
+The full (likelihood-only, associations-frozen) log-likelihood is a sum of squared linear
+functions of pairs of junction positions, hence a single quadratic form in the *stacked*
+`θ`:
+
+```
+log P(D | θ, E) = −½ θᵀ Λ θ + ηᵀθ + const        θ | E, D  ~  N(Λ⁻¹η, Λ⁻¹)
+```
+
+`Λ ∈ ℝ^{2Nj×2Nj}` is assembled from exactly the per-segment terms of §5.4, and critically
+`Λ_{jk} = 0` whenever `j, k` are not connected by a segment — a junction only couples to its
+graph neighbours. `θ` is therefore a **Gaussian Markov Random Field** whose
+conditional-independence structure is exactly the floor-plan graph `G`. The standard
+conditioning formula for one block of a multivariate Gaussian, specialised to this sparse
+`Λ`, reduces to a sum over `j`'s neighbours only — which is exactly the §5.4 formula. That
+per-junction conditional is therefore not a separate heuristic; it *is* the true full
+conditional of `N(Λ⁻¹η, Λ⁻¹)`, and by the standard Gibbs-sampling guarantee (a consistent
+set of full conditionals determines a unique joint; cycling through them is ergodic for it)
+sweeping single-site draws from it converges exactly to that Gaussian.
+
+### 5.6 What `N(Λ⁻¹η, Λ⁻¹)` approximates
+
+`N(Λ⁻¹η, Λ⁻¹)` is **not** `p(θ|E,D)`. It differs by exactly the two approximations
+introduced to make it tractable:
+
+1. **Priors dropped.** `Λ, η` contain only likelihood terms; orthogonality,
+   junction-regularity, and room-size priors (non-quadratic in `θ`) are excluded.
+2. **Associations frozen.** `z_p, s_p, t_p` are held at their current values rather than
+   resampled as functions of `θ` — a local linearization, not a global one.
+
+So `N(Λ⁻¹η, Λ⁻¹)` is a local quadratic (Laplace-style) approximation to `p(θ|E,D)`,
+recomputed fresh every sweep. Gibbs-sampling it exactly targets *that approximation's*
+stationary distribution, not the true posterior — treating it as a literal always-accept
+step biases the chain.
+
+**Resolution:** use `N(μ_j, Σ_j)` as an independence-sampler MH **proposal** rather than a
+raw draw. `μ_j, Σ_j` are computed once from the state at the start of the update (not
+recomputed at the proposed point), so the Hastings correction only needs the fixed
+proposal density evaluated at the two points:
+
+```
+α = min{ 1,
+    P(D|G')P(G')      N(x_j ; μ_j, Σ_j)
+   ────────────── × ─────────────────────
+    P(D|G)P(G)        N(x_j'; μ_j, Σ_j)
+}
+```
+
+This keeps almost all of the mixing benefit (the proposal is already close to the true
+conditional's mode) while the accept/reject step absorbs the dropped priors and any
+association mismatch exactly, so the chain provably targets `p(θ|E,D)` rather than the
+Gaussian stand-in. The min-length/planarity constraints fall out for free as `−∞` log-prior
+on violating proposals, with no need for a bespoke truncated-Gaussian sampler.
+
+### 5.7 Pseudo-code
+
+```
+function GIBBS_SWEEP(G, D, rng_key):
+    for j in G.junctions:
+        x_j ← j.position
+        Λ_j ← 0 (2×2);  η_j ← 0 (2-vector)
+
+        for ℓ in G.incident_segments(j):
+            x_o ← position of the other junction on ℓ
+            for p in inliers_of(ℓ, D):                  # frozen z_p = inlier, s_p = ℓ
+                t_p  ← projection_parameter(p, x_j, x_o) # frozen at current positions
+                c_p  ← 1 − t_p
+                σ_p² ← σ²(height(p))
+                Λ_j  ← Λ_j + (c_p² / σ_p²) · I₂
+                η_j  ← η_j + (c_p / σ_p²) · (p − t_p · x_o)
+
+        Σ_j ← Λ_j⁻¹;  μ_j ← Σ_j η_j             # §5.4 closed form
+
+        x_j' ← sample N(μ_j, Σ_j)                # independence-sampler proposal
+        G' ← G.move_junction(j, x_j')
+
+        α ← min(1,
+              [P(D|G')P(G')] / [P(D|G)P(G)]
+            × [N(x_j; μ_j, Σ_j)] / [N(x_j'; μ_j, Σ_j)]
+        )
+        u ← Uniform(0, 1)
+        if u < α:
+            G ← G'                               # else G unchanged, next junction
+
+    return G
+```
+
+This is what the `Gibbs-within-RJMCMC` block in §6's main loop calls.
+
+---
+
+## 6. Full algorithm pseudo-code
 
 ```
 function RJMCMC(D, prior, likelihood, config, rng_key):
@@ -275,9 +439,7 @@ function RJMCMC(D, prior, likelihood, config, rng_key):
         # ---- Gibbs-within-RJMCMC: refresh junction positions given fixed topology --
 
         if t mod config.gibbs_interval == 0:
-            for j in G.junctions:
-                G.junctions[j].position ← sample from conditional Gaussian posterior
-                    (closed form under the analytical likelihood, topology E held fixed)
+            G ← GIBBS_SWEEP(G, D, rng_key)                # §5
 
         # ---- record ----------------------------------------------------------------
 
@@ -296,7 +458,7 @@ respective candidate sets.
 
 ---
 
-## 6. Open items before implementation
+## 7. Open items before implementation
 
 - **`q_r(·)` must be chosen and implemented.** `SPLIT_OFFSET` currently hard-codes the
   offset radius in `split_junction`; it should instead parameterise a proposal distribution
@@ -307,10 +469,17 @@ respective candidate sets.
 - **`docs/inference.md`'s move descriptions for split/merge** should be updated once the
   above is implemented, to reference `q_r` instead of the fixed `SPLIT_OFFSET`, mirroring
   the fix already made to the segment birth/death descriptions.
+- **The junction-position Gibbs refresh (§5) needs to be implemented as an
+  independence-sampler MH step**, not a raw always-accept draw — `GIBBS_SWEEP` in §5.7
+  requires evaluating `P(D|G)`, `P(G)`, and the fixed Gaussian proposal density at both the
+  current and proposed positions for each junction.
 
 ---
 
-## 7. References
+## 8. References
 
 Green, P. J. (1995). Reversible jump Markov chain Monte Carlo computation and Bayesian
 model determination. *Biometrika*, 82(4), 711–732. https://doi.org/10.1093/biomet/82.4.711
+
+Rue, H., & Held, L. (2005). *Gaussian Markov Random Fields: Theory and Applications*.
+Chapman & Hall/CRC.
