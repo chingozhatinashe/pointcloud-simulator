@@ -180,7 +180,34 @@ class TestProposeSegmentDeath:
         assert len(room.segments) == n_segments_before
 
 
+def _room_with_nearby_obstacle() -> tuple[FloorPlanGraph, int]:
+    """A unit square plus an unrelated vertical wall just past its left edge (at
+    x=-0.05, spanning y in [-1,1]) -- close enough that a large perturbation of
+    junction `a` (at the origin) reliably sweeps one of its incident segments
+    through the obstacle, breaking planarity.
+    """
+    graph = FloorPlanGraph()
+    a = graph.add_junction((0.0, 0.0))
+    b = graph.add_junction((1.0, 0.0))
+    c = graph.add_junction((1.0, 1.0))
+    d = graph.add_junction((0.0, 1.0))
+    for start, end in ((a, b), (b, c), (c, d), (d, a)):
+        graph.add_segment(start.id, end.id)
+    obstacle_a = graph.add_junction((-0.05, -1.0))
+    obstacle_b = graph.add_junction((-0.05, 1.0))
+    graph.add_segment(obstacle_a.id, obstacle_b.id)
+    return graph, a.id
+
+
 class TestProposeJunctionPerturbation:
+    def test_rejects_a_move_that_crosses_an_unrelated_wall(self):
+        graph, _ = _room_with_nearby_obstacle()
+        results = [
+            propose_junction_perturbation(graph, 1.0, jax.random.PRNGKey(key)) for key in range(15)
+        ]
+        assert any(result is None for result in results)
+        assert all(result.graph.is_planar() for result in results if result is not None)
+
     def test_returns_none_with_no_junctions(self):
         graph = FloorPlanGraph()
         assert propose_junction_perturbation(graph, 0.05, jax.random.PRNGKey(0)) is None
@@ -211,6 +238,14 @@ class TestProposeJunctionPerturbation:
 
 
 class TestProposeSegmentPerturbation:
+    def test_rejects_a_rotation_that_crosses_an_unrelated_wall(self):
+        graph, _ = _room_with_nearby_obstacle()
+        results = [
+            propose_segment_perturbation(graph, 3.0, jax.random.PRNGKey(key)) for key in range(15)
+        ]
+        assert any(result is None for result in results)
+        assert all(result.graph.is_planar() for result in results if result is not None)
+
     def test_returns_none_with_no_segments(self):
         graph = FloorPlanGraph()
         assert propose_segment_perturbation(graph, 0.05, jax.random.PRNGKey(0)) is None
