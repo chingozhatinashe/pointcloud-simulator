@@ -157,18 +157,19 @@ The reference Bayesian inference implementation. RJMCMC targets the posterior `P
 
 **Proposal moves:**
 
-The RJMCMC kernel implements the following move types, each proposed with a configurable probability:
+The RJMCMC kernel implements the following move types, each proposed with a configurable probability. A `WallSegment` stores only the IDs of the two junctions it connects — it has no free parameters of its own — so the continuous model dimension is `2 · Nj` (junction positions) regardless of how many segments exist. Moves therefore split into two kinds: **within-model** moves, which hold `Nj` fixed and so leave the continuous dimension unchanged (no Jacobian needed), and **between-model** moves, which change `Nj` and require the dimension-matching Jacobian.
 
-**Segment birth** — propose adding a new wall segment between two junctions:
+*Within-model moves (`Nj` fixed, standard MH ratio, no Jacobian):*
+
+**Segment birth** — propose adding a new wall segment between two existing junctions:
 - Sample a pair of junctions `(j_a, j_b)` from the current junction set
 - Propose segment `ℓ_new = (j_a, j_b)`
 - Check planarity — reject proposal immediately if segment crosses existing segments
-- Compute MH acceptance ratio including the dimension-matching Jacobian term
-- Dimensionality increases by the degrees of freedom of the new segment
+- `Nj` is unchanged; only the discrete edge set `E` gains a member, so the acceptance ratio is a plain likelihood × prior × proposal ratio — no Jacobian term
 
 **Segment death** — propose removing an existing wall segment:
 - Sample segment `ℓ` uniformly from current segments
-- Reverse of birth; dimensionality decreases
+- Reverse of birth — removes an edge from `E`; `Nj` unchanged, no Jacobian term
 
 **Junction perturbation** — move a junction's position, updating all incident segments:
 - Sample junction `j` uniformly from current junctions
@@ -176,21 +177,23 @@ The RJMCMC kernel implements the following move types, each proposed with a conf
 - Standard MH acceptance ratio — no dimension change
 - This is the primary move for refining geometric precision given fixed topology
 
+**Segment perturbation** — perturb a segment's orientation:
+- Sample segment `ℓ` and propose a small rotation of its orientation
+- Update its junction positions to maintain connectivity
+- `Nj` and `E` are both unchanged — used for fine-tuning wall angles
+
+*Between-model moves (`Nj` changes, dimension-matching Jacobian required):*
+
 **Junction merge** — collapse two nearby junctions into one:
 - Sample a pair of junctions `(j_a, j_b)` within a distance threshold
 - Replace both with a single junction at their midpoint
 - Update all incident segments
-- Dimensionality-reducing transdimensional move
+- `Nj → Nj - 1`; dimensionality-reducing transdimensional move
 
 **Junction split** — split one junction into two:
 - Sample a junction `j` and a split direction
 - Replace with two junctions displaced along the split direction
-- Dimensionality-increasing transdimensional move; reverse of merge
-
-**Segment perturbation** — perturb a segment's orientation while keeping its junctions fixed:
-- Sample segment `ℓ` and propose a small rotation of its orientation
-- Update junction positions to maintain connectivity
-- Used for fine-tuning wall angles
+- `Nj → Nj + 1`; dimensionality-increasing transdimensional move; reverse of merge
 
 **Gibbs-within-RJMCMC structure:**
 
