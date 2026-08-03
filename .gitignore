@@ -221,3 +221,6 @@ __marimo__/
 
 # data
 data/3DSES
+
+# experiments/run_inference.py output (config.json/summary.json/result.pkl per run)
+experiments/results/

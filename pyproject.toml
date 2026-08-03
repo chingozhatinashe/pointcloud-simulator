@@ -50,6 +50,7 @@ testpaths = [
     "simulator/tests",
     "data/tests",
     "inference/tests",
+    "experiments/tests",
 ]
 addopts = "--tb=short -q"
 

@@ -106,6 +106,14 @@ class TestInferenceConfig:
         config = _inference_config()
         assert config.n_particles == 1
 
+    def test_rejects_negative_gibbs_interval(self):
+        with pytest.raises(ValueError):
+            _inference_config(gibbs_interval=-1)
+
+    def test_gibbs_interval_defaults_to_zero(self):
+        config = _inference_config()
+        assert config.gibbs_interval == 0
+
     def test_to_dict_serialises_output_dir_as_string(self):
         config = _inference_config(output_dir=Path("results") / "run1")
         data = config.to_dict()
