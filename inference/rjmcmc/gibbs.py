@@ -207,9 +207,7 @@ def gibbs_sweep(
         current_position = graph.junctions[junction_id].position
         proposed_position = mu_j + jnp.sqrt(variance) * jax.random.normal(propose_key, (2,))
 
-        current_log_posterior = _log_posterior(
-            graph, point_cloud, likelihood.params, prior_config
-        )
+        current_log_posterior = _log_posterior(graph, point_cloud, likelihood.params, prior_config)
         proposed_graph = graph.copy()
         proposed_graph.move_junction(junction_id, proposed_position)
         proposed_log_posterior = _log_posterior(
