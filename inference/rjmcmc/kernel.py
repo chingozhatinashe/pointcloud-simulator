@@ -13,8 +13,11 @@ for every move type -- the dimension-matching Jacobian split/merge need is
 folded into their own `log_proposal_ratio` by `inference.rjmcmc.proposals`
 (section 3), so `step` itself needs no special-casing per move.
 
-The Gibbs junction-position refresh (section 5) is not yet implemented -- see
-section 7's open items.
+The Gibbs junction-position refresh (section 5) is implemented separately in
+`inference.rjmcmc.gibbs.gibbs_sweep` -- it is not part of `step` itself, since
+section 6's main loop interleaves it between `step` calls (`t mod
+config.gibbs_interval == 0`) rather than folding it into the per-move
+acceptance ratio above.
 """
 
 from __future__ import annotations
