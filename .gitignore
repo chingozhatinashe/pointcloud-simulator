@@ -221,6 +221,7 @@ __marimo__/
 
 # data
 data/3DSES
+data/ISPRS
 
 # experiments/run_inference.py output (config.json/summary.json/result.pkl per run)
 experiments/results/
