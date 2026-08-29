@@ -431,7 +431,9 @@ class TestRegisterReferenceToScan:
         assert transformed[:, 2].mean() == pytest.approx(scan[:, 2].mean(), abs=0.1)
 
 
-def _build_ifc_room(path, corners, *, thickness=0.05, height=2.5, elevation=0.0, closed=True) -> None:
+def _build_ifc_room(
+    path, corners, *, thickness=0.05, height=2.5, elevation=0.0, closed=True
+) -> None:
     """A minimal valid IFC2X3 file: one storey containing one wall per edge of `corners`,
     built via ifcopenshell's high-level API rather than hand-authored STEP text.
 
@@ -482,7 +484,9 @@ def _build_ifc_room(path, corners, *, thickness=0.05, height=2.5, elevation=0.0,
             height=height,
             thickness=thickness,
         )
-        ifcopenshell.api.geometry.assign_representation(model, product=wall, representation=representation)
+        ifcopenshell.api.geometry.assign_representation(
+            model, product=wall, representation=representation
+        )
 
     model.write(str(path))
 
@@ -529,7 +533,9 @@ class TestExtractWallsByStorey:
             parent=context,
         )
         site = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name="Site")
-        building = ifcopenshell.api.root.create_entity(model, ifc_class="IfcBuilding", name="Building")
+        building = ifcopenshell.api.root.create_entity(
+            model, ifc_class="IfcBuilding", name="Building"
+        )
         ifcopenshell.api.aggregate.assign_object(model, relating_object=project, products=[site])
         ifcopenshell.api.aggregate.assign_object(model, relating_object=site, products=[building])
 

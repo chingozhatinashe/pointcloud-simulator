@@ -124,9 +124,14 @@ def extract_walls_by_storey(ifc_path: Path) -> dict[str, dict]:
         centerline_2d = _fit_centerline_2d(vertices[:, :2])
         mean_z = float(vertices[:, 2].mean())
         centerline_3d = np.array(
-            [[centerline_2d[0], centerline_2d[1], mean_z], [centerline_2d[2], centerline_2d[3], mean_z]]
+            [
+                [centerline_2d[0], centerline_2d[1], mean_z],
+                [centerline_2d[2], centerline_2d[3], mean_z],
+            ]
         )
-        storeys[storey.GlobalId]["walls"].append({"vertices": vertices, "centerline": centerline_3d})
+        storeys[storey.GlobalId]["walls"].append(
+            {"vertices": vertices, "centerline": centerline_3d}
+        )
 
     return storeys
 
@@ -243,11 +248,7 @@ class ISPRSDataset:
 
     def _register(self) -> RegistrationResult | None:
         reference_points = np.concatenate(
-            [
-                wall["vertices"]
-                for storey in self._ifc_storeys.values()
-                for wall in storey["walls"]
-            ],
+            [wall["vertices"] for storey in self._ifc_storeys.values() for wall in storey["walls"]],
             axis=0,
         )
         if reference_points.shape[0] == 0:
