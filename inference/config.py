@@ -108,6 +108,7 @@ class InferenceConfig:
     rng_seed: int
     output_dir: Path
     n_particles: int = 1  # SMC only; ignored by other methods
+    gibbs_interval: int = 0  # RJMCMC only; ignored by other methods. 0 disables it.
 
     def __post_init__(self) -> None:
         if self.method not in VALID_METHODS:
@@ -120,6 +121,8 @@ class InferenceConfig:
             raise ValueError(f"n_iterations must be positive, got {self.n_iterations}")
         if self.n_particles <= 0:
             raise ValueError(f"n_particles must be positive, got {self.n_particles}")
+        if self.gibbs_interval < 0:
+            raise ValueError(f"gibbs_interval must be non-negative, got {self.gibbs_interval}")
 
     def to_dict(self) -> dict:
         """A JSON-serialisable representation, for logging alongside every result."""
