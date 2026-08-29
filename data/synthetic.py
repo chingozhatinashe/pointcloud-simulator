@@ -22,43 +22,6 @@ import numpy as np
 from representation.floor_plan import J_MAX, K_MAX, FloorPlanGraph
 from simulator.engine import FloorPointCloud, PointCloudSlice
 
-_JUNCTION_MATCH_TOLERANCE = 1e-4
-
-
-def _floor_plan_bounds(floor_plan: FloorPlanGraph) -> jnp.ndarray:
-    positions = jnp.stack([junction.position for junction in floor_plan.junctions.values()])
-    return jnp.concatenate([jnp.min(positions, axis=0), jnp.max(positions, axis=0)])
-
-
-def _floor_plan_from_arrays(
-    segments: np.ndarray, segment_mask: np.ndarray, junctions: np.ndarray, junction_mask: np.ndarray
-) -> FloorPlanGraph:
-    """Reconstruct a FloorPlanGraph from its padded array export.
-
-    The array export stores segment *coordinates*, not junction-index references, so
-    topology is recovered by matching each segment endpoint back to the junction it
-    was derived from by position. This is reliable (not just a heuristic) because
-    `to_segment_array()` derives each segment's coordinates directly from its
-    junctions' positions, so the values are identical up to float32 rounding.
-    """
-    graph = FloorPlanGraph()
-    valid_junctions = junctions[junction_mask]
-    junction_ids = [graph.add_junction(pos).id for pos in valid_junctions]
-
-    def _match(point: np.ndarray) -> int:
-        distances = np.linalg.norm(valid_junctions - point, axis=1)
-        nearest = int(np.argmin(distances))
-        if distances[nearest] > _JUNCTION_MATCH_TOLERANCE:
-            raise ValueError("Could not match a stored segment endpoint to a stored junction")
-        return junction_ids[nearest]
-
-    for row in segments[segment_mask]:
-        start_id = _match(row[:2])
-        end_id = _match(row[2:])
-        if start_id != end_id:
-            graph.add_segment(start_id, end_id)
-    return graph
-
 
 class DatasetGenerator:
     """Streams `(FloorPlanGraph, FloorPointCloud)` pairs to an HDF5 file.
@@ -241,7 +204,7 @@ class SyntheticDataset:
             slice_heights = np.asarray(f["point_clouds/slice_heights"][real_index])
             scanner_positions = np.asarray(f["point_clouds/scanner_positions"][real_index])
 
-        floor_plan = _floor_plan_from_arrays(segments, segment_mask, junctions, junction_mask)
+        floor_plan = FloorPlanGraph.from_arrays(segments, segment_mask, junctions, junction_mask)
         points_3d = points_3d_flat.reshape(-1, 3)
 
         slices = []
@@ -255,7 +218,7 @@ class SyntheticDataset:
             slices=slices,
             points_3d=jnp.asarray(points_3d),
             scanner_positions=jnp.asarray(scanner_positions),
-            floor_plan_bounds=_floor_plan_bounds(floor_plan),
+            floor_plan_bounds=floor_plan.bounds(),
         )
         return floor_plan, point_cloud
 

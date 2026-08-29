@@ -11,6 +11,7 @@ import itertools
 import jax
 import jax.numpy as jnp
 import networkx as nx
+import numpy as np
 from shapely.geometry import LineString
 
 from representation.primitives import Junction, WallSegment
@@ -19,6 +20,7 @@ K_MAX = 128  # Maximum number of wall segments per floor plan
 J_MAX = 256  # Maximum number of junctions per floor plan
 
 MIN_SEGMENT_LENGTH = 0.1  # metres
+_ARRAY_JUNCTION_MATCH_TOLERANCE = 1e-4
 
 
 def _point_to_segment_distance(point: jnp.ndarray, segment: jnp.ndarray) -> jnp.ndarray:
@@ -201,6 +203,48 @@ class FloorPlanGraph:
     def junction_mask(self) -> jnp.ndarray:
         mask = jnp.zeros((J_MAX,), dtype=bool)
         return mask.at[: len(self.junctions)].set(True)
+
+    def bounds(self) -> jnp.ndarray:
+        """2D bounding box `(x_min, y_min, x_max, y_max)` over all junction positions."""
+        positions = jnp.stack([junction.position for junction in self.junctions.values()])
+        return jnp.concatenate([jnp.min(positions, axis=0), jnp.max(positions, axis=0)])
+
+    @classmethod
+    def from_arrays(
+        cls,
+        segments: jnp.ndarray,
+        segment_mask: jnp.ndarray,
+        junctions: jnp.ndarray,
+        junction_mask: jnp.ndarray,
+        *,
+        match_tolerance: float = _ARRAY_JUNCTION_MATCH_TOLERANCE,
+    ) -> FloorPlanGraph:
+        """Reconstruct a FloorPlanGraph from its padded array export.
+
+        The array export (`to_segment_array()` / `to_junction_array()`) stores segment
+        *coordinates*, not junction-index references, so topology is recovered by matching
+        each segment endpoint back to the junction it was derived from by position. This is
+        reliable (not just a heuristic) because `to_segment_array()` derives each segment's
+        coordinates directly from its junctions' positions, so the values are identical up
+        to float32 rounding.
+        """
+        graph = cls()
+        valid_junctions = np.asarray(junctions)[np.asarray(junction_mask)]
+        junction_ids = [graph.add_junction(pos).id for pos in valid_junctions]
+
+        def _match(point: np.ndarray) -> int:
+            distances = np.linalg.norm(valid_junctions - point, axis=1)
+            nearest = int(np.argmin(distances))
+            if distances[nearest] > match_tolerance:
+                raise ValueError("Could not match a stored segment endpoint to a stored junction")
+            return junction_ids[nearest]
+
+        for row in np.asarray(segments)[np.asarray(segment_mask)]:
+            start_id = _match(row[:2])
+            end_id = _match(row[2:])
+            if start_id != end_id:
+                graph.add_segment(start_id, end_id)
+        return graph
 
     def nearest_segment_distance(self, point) -> jnp.ndarray:
         """Distance from `point` to the closest wall segment. Infinite if there are none."""

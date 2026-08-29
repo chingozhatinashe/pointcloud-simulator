@@ -67,11 +67,6 @@ class FloorPointCloud:
         raise ValueError(f"Unknown plot mode: {mode!r}")
 
 
-def _floor_plan_bounds(floor_plan: FloorPlanGraph) -> jnp.ndarray:
-    positions = jnp.stack([junction.position for junction in floor_plan.junctions.values()])
-    return jnp.concatenate([jnp.min(positions, axis=0), jnp.max(positions, axis=0)])
-
-
 @partial(jax.jit, static_argnames=("noise_model", "differentiable", "beta"))
 def simulate_segments(
     origins: jnp.ndarray,
@@ -145,7 +140,7 @@ def simulate(
     scanner_positions = jnp.asarray(scanner_positions, dtype=jnp.float32)
     segments = floor_plan.to_segment_array()
     segment_mask = floor_plan.segment_mask()
-    bounds = _floor_plan_bounds(floor_plan)
+    bounds = floor_plan.bounds()
 
     slice_keys = jax.random.split(rng_key, len(heights))
     slices: list[PointCloudSlice] = []
