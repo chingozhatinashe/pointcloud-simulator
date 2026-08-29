@@ -10,10 +10,6 @@ from __future__ import annotations
 import io
 import zipfile
 
-import jax.numpy as jnp
-import numpy as np
-import pytest
-
 import ifcopenshell.api.aggregate
 import ifcopenshell.api.context
 import ifcopenshell.api.geometry
@@ -22,6 +18,9 @@ import ifcopenshell.api.root
 import ifcopenshell.api.spatial
 import ifcopenshell.api.unit
 import ifcopenshell.util.unit
+import jax.numpy as jnp
+import numpy as np
+import pytest
 
 from data.datasets.cache import CachedBenchmarkDataset, cache_benchmark_dataset
 from data.datasets.isprs import ISPRSDataset, extract_walls_by_storey
