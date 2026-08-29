@@ -191,6 +191,34 @@ class TestGeometricQueries:
         with pytest.raises(ValueError):
             graph.to_junction_array()
 
+    def test_bounds(self):
+        graph = square_room()
+        assert jnp.allclose(graph.bounds(), jnp.array([0.0, 0.0, 1.0, 1.0]))
+
+    def test_from_arrays_round_trips_a_graph(self):
+        graph = square_room()
+        rebuilt = FloorPlanGraph.from_arrays(
+            graph.to_segment_array(),
+            graph.segment_mask(),
+            graph.to_junction_array(),
+            graph.junction_mask(),
+        )
+        assert len(rebuilt.junctions) == len(graph.junctions)
+        assert len(rebuilt.segments) == len(graph.segments)
+        assert jnp.allclose(rebuilt.to_segment_array(), graph.to_segment_array())
+        assert rebuilt.is_connected()
+
+    def test_from_arrays_empty_graph_round_trips(self):
+        graph = FloorPlanGraph()
+        rebuilt = FloorPlanGraph.from_arrays(
+            graph.to_segment_array(),
+            graph.segment_mask(),
+            graph.to_junction_array(),
+            graph.junction_mask(),
+        )
+        assert rebuilt.junctions == {}
+        assert rebuilt.segments == {}
+
     def test_nearest_segment_distance(self):
         graph = square_room()
         distance = graph.nearest_segment_distance((0.5, -1.0))
