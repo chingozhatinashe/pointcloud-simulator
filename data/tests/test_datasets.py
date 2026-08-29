@@ -10,11 +10,21 @@ from __future__ import annotations
 import io
 import zipfile
 
+import ifcopenshell.api.aggregate
+import ifcopenshell.api.context
+import ifcopenshell.api.geometry
+import ifcopenshell.api.project
+import ifcopenshell.api.root
+import ifcopenshell.api.spatial
+import ifcopenshell.api.unit
+import ifcopenshell.util.unit
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from data.datasets.cache import CachedBenchmarkDataset, cache_benchmark_dataset
+from data.datasets.isprs import ISPRSDataset, extract_walls_by_storey
+from data.datasets.registration import register_reference_to_scan
 from data.datasets.three_d_ses import ThreeDSESDataset
 from data.datasets.wall_fitting import build_floor_plan_graph, fit_wall_segments, infer_wall_label
 from representation.floor_plan import FloorPlanGraph
@@ -373,5 +383,304 @@ class TestCacheBenchmarkDataset:
 
         assert len(cached) == len(dataset)
         point_cloud, floor_plan = cached[0]
+        assert isinstance(point_cloud, FloorPointCloud)
+        assert isinstance(floor_plan, FloorPlanGraph)
+
+
+class TestRegisterReferenceToScan:
+    def test_recovers_a_known_z_offset(self):
+        rng = np.random.default_rng(20)
+        reference = _rectangle_perimeter_points(
+            _ROOM_CORNERS, n_per_side=300, z_min=0.0, z_max=2.5, rng=rng, noise=0.0
+        )
+        known_z_offset = 7.0
+        scan = reference.copy()
+        scan[:, 2] += known_z_offset
+        scan += rng.normal(scale=0.02, size=scan.shape)
+
+        result = register_reference_to_scan(reference, scan)
+
+        assert result.z_offset == pytest.approx(known_z_offset, abs=0.05)
+        assert result.success
+        assert result.residual < 0.15
+
+    def test_rejects_unrelated_point_clouds(self):
+        rng = np.random.default_rng(21)
+        reference = _rectangle_perimeter_points(
+            _ROOM_CORNERS, n_per_side=300, z_min=0.0, z_max=2.5, rng=rng, noise=0.0
+        )
+        unrelated = rng.uniform(-50, 50, size=(1000, 3))
+
+        result = register_reference_to_scan(reference, unrelated)
+
+        assert not result.success
+        assert result.residual > 0.15
+
+    def test_apply_composes_z_offset_and_icp_transform(self):
+        rng = np.random.default_rng(22)
+        reference = _rectangle_perimeter_points(
+            _ROOM_CORNERS, n_per_side=300, z_min=0.0, z_max=2.5, rng=rng, noise=0.0
+        )
+        scan = reference.copy()
+        scan[:, 2] += 2.0
+
+        result = register_reference_to_scan(reference, scan)
+        transformed = result.apply(reference)
+
+        # transformed reference should now sit close to the scan's Z range
+        assert transformed[:, 2].mean() == pytest.approx(scan[:, 2].mean(), abs=0.1)
+
+
+def _build_ifc_room(
+    path, corners, *, thickness=0.05, height=2.5, elevation=0.0, closed=True
+) -> None:
+    """A minimal valid IFC2X3 file: one storey containing one wall per edge of `corners`,
+    built via ifcopenshell's high-level API rather than hand-authored STEP text.
+
+    `closed=True` (the default) treats `corners` as a closed polygon loop (edge from the last
+    corner back to the first); `closed=False` treats it as an open polyline, e.g. for a test
+    with just 2 corners representing a single standalone wall.
+    """
+    model = ifcopenshell.api.project.create_file()
+    project = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="Test")
+    ifcopenshell.api.unit.assign_unit(model)
+    context = ifcopenshell.api.context.add_context(model, context_type="Model")
+    body = ifcopenshell.api.context.add_context(
+        model,
+        context_type="Model",
+        context_identifier="Body",
+        target_view="MODEL_VIEW",
+        parent=context,
+    )
+
+    site = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name="Site")
+    building = ifcopenshell.api.root.create_entity(model, ifc_class="IfcBuilding", name="Building")
+    storey = ifcopenshell.api.root.create_entity(
+        model, ifc_class="IfcBuildingStorey", name="Storey1"
+    )
+    # IfcBuildingStorey.Elevation is a raw attribute stored in the file's own unit -- unlike
+    # create_2pt_wall's arguments, it isn't auto-converted from SI, so convert explicitly
+    # (assign_unit() with no args defaults to millimetres, matching the real ISPRS IFC files).
+    storey.Elevation = elevation / ifcopenshell.util.unit.calculate_unit_scale(model)
+
+    ifcopenshell.api.aggregate.assign_object(model, relating_object=project, products=[site])
+    ifcopenshell.api.aggregate.assign_object(model, relating_object=site, products=[building])
+    ifcopenshell.api.aggregate.assign_object(model, relating_object=building, products=[storey])
+
+    n = len(corners)
+    num_edges = n if closed else n - 1
+    for i in range(num_edges):
+        p1, p2 = corners[i], corners[(i + 1) % n]
+        wall = ifcopenshell.api.root.create_entity(model, ifc_class="IfcWall", name=f"Wall{i}")
+        ifcopenshell.api.spatial.assign_container(model, relating_structure=storey, products=[wall])
+        ifcopenshell.api.geometry.edit_object_placement(model, product=wall)
+        representation = ifcopenshell.api.geometry.create_2pt_wall(
+            model,
+            element=wall,
+            context=body,
+            p1=p1,
+            p2=p2,
+            elevation=elevation,
+            height=height,
+            thickness=thickness,
+        )
+        ifcopenshell.api.geometry.assign_representation(
+            model, product=wall, representation=representation
+        )
+
+    model.write(str(path))
+
+
+class TestExtractWallsByStorey:
+    def test_recovers_wall_centerline_and_storey_elevation(self, tmp_path):
+        ifc_path = tmp_path / "room.ifc"
+        _build_ifc_room(
+            ifc_path,
+            [(1.0, 2.0), (5.0, 2.0)],
+            thickness=0.2,
+            height=2.5,
+            elevation=1.0,
+            closed=False,
+        )
+
+        storeys = extract_walls_by_storey(ifc_path)
+
+        assert len(storeys) == 1
+        (storey,) = storeys.values()
+        assert storey["elevation"] == pytest.approx(1.0)
+        assert len(storey["walls"]) == 1
+        centerline = storey["walls"][0]["centerline"]
+        length = np.linalg.norm(centerline[1, :2] - centerline[0, :2])
+        assert length == pytest.approx(4.0, abs=0.01)
+        # centerline sits within half the wall's thickness of the requested axis
+        assert abs(centerline[0, 1] - 2.0) <= 0.1 + 1e-6
+        # centerline Z is mid-height (elevation + height / 2)
+        assert centerline[0, 2] == pytest.approx(1.0 + 1.25, abs=0.01)
+
+    def test_groups_walls_by_storey(self, tmp_path):
+        ifc_path = tmp_path / "two_storey.ifc"
+        # ifcopenshell's high-level API doesn't expose multi-storey convenience helpers, so this
+        # extends _build_ifc_room's single-storey model manually to add a second storey + wall
+        model = ifcopenshell.api.project.create_file()
+        project = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="Test")
+        ifcopenshell.api.unit.assign_unit(model)
+        context = ifcopenshell.api.context.add_context(model, context_type="Model")
+        body = ifcopenshell.api.context.add_context(
+            model,
+            context_type="Model",
+            context_identifier="Body",
+            target_view="MODEL_VIEW",
+            parent=context,
+        )
+        site = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name="Site")
+        building = ifcopenshell.api.root.create_entity(
+            model, ifc_class="IfcBuilding", name="Building"
+        )
+        ifcopenshell.api.aggregate.assign_object(model, relating_object=project, products=[site])
+        ifcopenshell.api.aggregate.assign_object(model, relating_object=site, products=[building])
+
+        for level, elevation in enumerate([0.0, 3.0]):
+            storey = ifcopenshell.api.root.create_entity(
+                model, ifc_class="IfcBuildingStorey", name=f"Storey{level}"
+            )
+            # see _build_ifc_room's comment on why this needs explicit unit conversion
+            storey.Elevation = elevation / ifcopenshell.util.unit.calculate_unit_scale(model)
+            ifcopenshell.api.aggregate.assign_object(
+                model, relating_object=building, products=[storey]
+            )
+            wall = ifcopenshell.api.root.create_entity(
+                model, ifc_class="IfcWall", name=f"Wall{level}"
+            )
+            ifcopenshell.api.spatial.assign_container(
+                model, relating_structure=storey, products=[wall]
+            )
+            ifcopenshell.api.geometry.edit_object_placement(model, product=wall)
+            representation = ifcopenshell.api.geometry.create_2pt_wall(
+                model,
+                element=wall,
+                context=body,
+                p1=(0.0, 0.0),
+                p2=(3.0, 0.0),
+                elevation=elevation,
+                height=2.5,
+                thickness=0.1,
+            )
+            ifcopenshell.api.geometry.assign_representation(
+                model, product=wall, representation=representation
+            )
+        model.write(str(ifc_path))
+
+        storeys = extract_walls_by_storey(ifc_path)
+
+        assert len(storeys) == 2
+        elevations = sorted(d["elevation"] for d in storeys.values())
+        assert elevations == pytest.approx([0.0, 3.0])
+        assert all(len(d["walls"]) == 1 for d in storeys.values())
+
+
+def _isprs_room_case_study(
+    tmp_path, *, corners=_ROOM_CORNERS, thickness=0.05, height=2.5, elevation=0.0, z_offset=0.0, rng
+):
+    """A tiny synthetic 'cs1' case study: a rectangular room, matched between an
+    ifcopenshell-built IFC reference and a synthetic point cloud (with full corner coverage --
+    unlike _rectangle_perimeter_points's [0.05, 0.95] sampling, registration needs points near
+    wall corners too, since IFC wall geometry is concentrated exactly there)."""
+    ifc_path = tmp_path / "CaseStudy1_TUB1_IFC.ifc"
+    _build_ifc_room(ifc_path, corners, thickness=thickness, height=height, elevation=elevation)
+
+    wall_points = []
+    n = len(corners)
+    for i in range(n):
+        p1, p2 = np.array(corners[i]), np.array(corners[(i + 1) % n])
+        t = rng.uniform(0.0, 1.0, 400)
+        xy = p1 + t[:, None] * (p2 - p1)
+        xy += rng.normal(scale=0.01, size=xy.shape)
+        z = rng.uniform(elevation, elevation + height, 400)
+        wall_points.append(np.column_stack([xy, z]))
+    wall_points = np.concatenate(wall_points)
+    floor_points = _horizontal_plane_points(
+        x_range=(corners[0][0], corners[2][0]),
+        y_range=(corners[0][1], corners[2][1]),
+        z=elevation,
+        n=200,
+        rng=rng,
+    )
+    ceiling_points = _horizontal_plane_points(
+        x_range=(corners[0][0], corners[2][0]),
+        y_range=(corners[0][1], corners[2][1]),
+        z=elevation + height,
+        n=200,
+        rng=rng,
+    )
+    points = np.concatenate([wall_points, floor_points, ceiling_points])
+    points[:, 2] += z_offset
+
+    archive_path = tmp_path / "CaseStudy1_TUB1.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        buffer = io.StringIO()
+        np.savetxt(buffer, points, fmt="%.6f")
+        archive.writestr(
+            "CaseStudy1/PointCloud_cs1_dec_x-y-z-localtime6precision.txt", buffer.getvalue()
+        )
+    return tmp_path
+
+
+class TestISPRSDataset:
+    def test_getitem_returns_point_cloud_and_registered_floor_plan(self, tmp_path):
+        rng = np.random.default_rng(30)
+        root = _isprs_room_case_study(tmp_path, rng=rng)
+
+        dataset = ISPRSDataset("cs1", root)
+
+        assert len(dataset) >= 1
+        point_cloud, floor_plan = dataset[0]
+        assert isinstance(point_cloud, FloorPointCloud)
+        assert isinstance(floor_plan, FloorPlanGraph)
+        assert len(floor_plan.segments) == 4
+        assert len(floor_plan.junctions) == 4
+
+    def test_registers_through_a_large_z_offset(self, tmp_path):
+        rng = np.random.default_rng(31)
+        root = _isprs_room_case_study(tmp_path, z_offset=7.0, rng=rng)
+
+        dataset = ISPRSDataset("cs1", root)
+        _, floor_plan = dataset[0]
+
+        assert floor_plan is not None
+        assert len(floor_plan.segments) == 4
+
+    def test_unrelated_point_cloud_yields_no_ground_truth(self, tmp_path):
+        rng = np.random.default_rng(32)
+        ifc_path = tmp_path / "CaseStudy1_TUB1_IFC.ifc"
+        _build_ifc_room(ifc_path, _ROOM_CORNERS, thickness=0.05, height=2.5, elevation=0.0)
+
+        points = rng.uniform(-500, 500, size=(2000, 3))
+        archive_path = tmp_path / "CaseStudy1_TUB1.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            buffer = io.StringIO()
+            np.savetxt(buffer, points, fmt="%.6f")
+            archive.writestr(
+                "CaseStudy1/PointCloud_cs1_dec_x-y-z-localtime6precision.txt", buffer.getvalue()
+            )
+
+        dataset = ISPRSDataset("cs1", tmp_path)
+
+        for idx in range(len(dataset)):
+            _, floor_plan = dataset[idx]
+            assert floor_plan is None
+
+    def test_unknown_case_study_raises(self, tmp_path):
+        with pytest.raises(ValueError):
+            ISPRSDataset("cs99", tmp_path)
+
+    def test_split_delegates_without_recomputing_registration(self, tmp_path):
+        rng = np.random.default_rng(33)
+        root = _isprs_room_case_study(tmp_path, rng=rng)
+        dataset = ISPRSDataset("cs1", root)
+
+        (only_split,) = dataset.split((1.0,))
+
+        assert len(only_split) == len(dataset)
+        point_cloud, floor_plan = only_split[0]
         assert isinstance(point_cloud, FloorPointCloud)
         assert isinstance(floor_plan, FloorPlanGraph)
