@@ -17,6 +17,16 @@ either), so using it as ground truth would require solving an unverified registr
 problem first. See the project plan for this module for the full investigation --
 CAD-based ground truth is a deliberately deferred follow-up, not an oversight.
 
+The floor plan is a property of the room, not of any one scan height, so wall points
+are line-fitted after projecting the storey's *entire* Z range onto the XY plane --
+not from a single height slice. A single slice would make the fitted ground truth
+depend on an arbitrary height choice, and would be vulnerable to whatever happens to
+occlude that particular band (a window, a door, furniture) even though the wall is
+solid at other heights. `self._heights` (default `simulator.engine.DEFAULT_HEIGHTS`)
+is a separate concept -- it controls what heights `FloorPointCloud`'s own slices are
+taken at, mirroring the Simulator's multi-height LiDAR sweep, and has no bearing on
+ground truth construction.
+
 A `.npy` "scan" is one scanner acquisition, not necessarily one storey -- some scans
 (observed directly on the locally-downloaded test-area files) span multiple floors,
 most likely where a stairwell or atrium is visible from the scan position. Each scan
@@ -36,7 +46,7 @@ import numpy as np
 
 from data.datasets.wall_fitting import build_floor_plan_graph, fit_wall_segments, infer_wall_label
 from data.normalisation import normalise
-from data.preprocessing import extract_height_slice, preprocess, segment_storeys
+from data.preprocessing import preprocess, segment_storeys
 from representation.floor_plan import FloorPlanGraph
 from simulator.engine import DEFAULT_HEIGHTS, FloorPointCloud
 
@@ -48,9 +58,6 @@ _VARIANT_ARCHIVES: dict[str, tuple[str, str | None]] = {
 }
 
 _LABELED_VARIANTS = frozenset({"gold", "silver", "bronze"})
-
-DEFAULT_WALL_SLICE_HEIGHT = 1.0  # metres above the storey floor
-DEFAULT_WALL_SLICE_TOLERANCE = 0.1  # metres
 
 
 @dataclass(frozen=True)
@@ -87,8 +94,6 @@ class ThreeDSESDataset:
         root: Path,
         *,
         heights: Sequence[float] = DEFAULT_HEIGHTS,
-        wall_slice_height: float = DEFAULT_WALL_SLICE_HEIGHT,
-        wall_slice_tolerance: float = DEFAULT_WALL_SLICE_TOLERANCE,
         _items: Sequence[_ScanRef] | None = None,
     ) -> None:
         if variant not in _VARIANT_ARCHIVES:
@@ -101,8 +106,6 @@ class ThreeDSESDataset:
         self._zip_path = self._root / archive_name
         self._folder = folder
         self._heights = heights
-        self._wall_slice_height = wall_slice_height
-        self._wall_slice_tolerance = wall_slice_tolerance
 
         self._items = list(_items) if _items is not None else self._build_index()
 
@@ -141,8 +144,6 @@ class ThreeDSESDataset:
                     self._variant,
                     self._root,
                     heights=self._heights,
-                    wall_slice_height=self._wall_slice_height,
-                    wall_slice_tolerance=self._wall_slice_tolerance,
                     _items=self._items[start:boundary],
                 )
             )
@@ -166,10 +167,10 @@ class ThreeDSESDataset:
         if self._variant in _LABELED_VARIANTS:
             labels = storey_points[:, -1]
             wall_label = infer_wall_label(normalised_xyz, labels)
-            wall_points_3d = normalised_xyz[labels == wall_label]
-            wall_points_2d = extract_height_slice(
-                wall_points_3d, self._wall_slice_height, self._wall_slice_tolerance
-            )
+            # Project every wall-labelled point across the storey's full Z range onto
+            # XY, rather than slicing at one height -- the floor plan is a property of
+            # the room, not of an arbitrarily chosen scan height (see module docstring).
+            wall_points_2d = np.asarray(normalised_xyz[labels == wall_label][:, :2])
             raw_segments = fit_wall_segments(wall_points_2d)
             floor_plan = build_floor_plan_graph(raw_segments)
 
