@@ -22,6 +22,7 @@ dependencies = [
     "blackjax",
     "tqdm",
     "pye57>=0.4.19",
+    "ifcopenshell>=0.8.5",
 ]
 
 [project.optional-dependencies]
