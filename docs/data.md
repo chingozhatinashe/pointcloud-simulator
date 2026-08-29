@@ -27,8 +27,8 @@ The Data component has no dependency on the Simulator or Inference components. I
 
 **Optional libraries (for specific benchmark datasets):**
 
-- `plyfile` — low-level `.ply` parsing for ScanNet and Matterport3D formats
-- `trimesh` — mesh-to-point-cloud conversion where benchmark datasets provide meshes rather than raw scans
+- `plyfile` — low-level `.ply` parsing for benchmark datasets that provide point clouds in `.ply` form (format to be confirmed per dataset against downloaded samples)
+- `trimesh` — CAD/mesh-to-point-cloud conversion: parsing the 3DSES OBJ CAD model, the ISPRS reference BIM/CAD models, and sampling ZInD's optional derived mesh
 
 ---
 
@@ -179,11 +179,13 @@ Provide standardised loaders for established academic datasets that contain buil
 
 **Supported datasets:**
 
-**ScanNet** — indoor RGB-D scans with mesh reconstructions. Loader converts mesh to point cloud via surface sampling, extracts per-room annotations, and constructs approximate ground truth `FloorPlanGraph` objects from the provided 2D floor plan annotations.
+**3DSES** — colorized TLS point clouds of a real engineering-school building (~427 m², 3 dataset variants), paired with a georeferenced 3D CAD/BIM model. Licensed CC BY-SA 4.0, no registration required. Loader parses the CAD model (OBJ, via `trimesh`) directly into a `FloorPlanGraph` — this is the only supported dataset where ground truth comes from an explicit BIM model rather than derived annotations, so it should be the first wrapper implemented. Sample files (`3DSES.zip`, `3DSES_cad_model.obj`, `3DSES_test_area.zip`) are already present locally under `data/3DSES/`; exact point cloud file format inside the archive must be confirmed against those files before implementation.
 
-**Matterport3D** — high-quality panoramic RGB-D scans of residential and commercial buildings. Loader handles the Matterport coordinate convention and extracts room-level segmentation.
+**ISPRS Indoor Modelling Benchmark** — 6 real TLS/MLS point clouds from different institutions and sensors, each paired with a manually produced reference BIM/CAD model. Purpose-built for scan-to-BIM comparison, which maps directly onto this project's evaluation metric. Free to download but restricted to research use with a no-redistribution clause — samples must not be committed to this repository; keep any local copies outside version control. Small scale (6 scenes), useful primarily as a precision benchmark rather than a training/diversity source.
 
-**S3DIS (Stanford Large-Scale 3D Indoor Spaces)** — annotated point clouds of office buildings across 6 areas. Loader extracts wall point annotations to construct approximate ground truth `FloorPlanGraph` objects.
+**S3DIS (Stanford Large-Scale 3D Indoor Spaces)** — annotated point clouds of office buildings across 6 areas (271 rooms). Access via registration form at buildingparser.stanford.edu; license terms are informal ("research use, cite the paper"), so treat redistribution of samples cautiously. Ground truth is point-wise semantic labels only (wall, ceiling, floor, door, column, ...) with no vector floor plan — the loader must fit lines/planes to wall-labelled points (e.g. RANSAC) and merge them into junctions before constructing a `FloorPlanGraph`. This is the most implementation-heavy of the four wrappers.
+
+**ZInD (Zillow Indoor Dataset)** — 67,448 real 360° panoramas across 1,575 homes, with extensively human-annotated 2D/3D floor plan polygons, room layouts, and door/window openings. License is the ZInD Terms of Use, academic/non-commercial, requiring registration with academic-credential verification (up to two weeks). Architecturally different from the other three: ZInD does not ship a native 3D point cloud — the loader must synthesize one by sampling points along the annotated wall polygons at the recorded panorama poses (an optional derived textured mesh can also be sampled as a secondary source). Ground truth is otherwise the best of the four — the annotated polygons convert almost directly into a `FloorPlanGraph`.
 
 **Interface contract:**
 

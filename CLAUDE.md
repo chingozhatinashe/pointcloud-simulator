@@ -69,9 +69,10 @@ bim_inference/
 │   ├── validation.py                  # ValidationReport and data quality checks
 │   ├── datasets/                       # Benchmark dataset wrappers
 │   │   ├── __init__.py
-│   │   ├── scannet.py                 # ScanNet loader and ground truth extractor
-│   │   ├── matterport.py             # Matterport3D loader
-│   │   └── s3dis.py                  # S3DIS loader
+│   │   ├── three_d_ses.py             # 3DSES loader; CAD/BIM ground truth extractor
+│   │   ├── isprs.py                   # ISPRS Indoor Modelling Benchmark loader
+│   │   ├── s3dis.py                   # S3DIS loader; wall-fitting ground truth extractor
+│   │   └── zind.py                    # ZInD loader; polygon-derived point cloud + ground truth
 │   └── tests/
 │       ├── __init__.py
 │       ├── test_loaders.py
