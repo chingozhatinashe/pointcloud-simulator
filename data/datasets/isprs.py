@@ -44,15 +44,22 @@ import open3d as o3d
 
 from data.datasets.registration import RegistrationResult, register_reference_to_scan
 from data.datasets.wall_fitting import build_floor_plan_graph
-from data.normalisation import normalise
+from data.normalisation import NormalisationTransform, normalise
 from data.preprocessing import preprocess, segment_storeys
 from representation.floor_plan import FloorPlanGraph
-from simulator.engine import DEFAULT_HEIGHTS, FloorPointCloud
+from simulator.engine import FloorPointCloud
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REGISTRATION_VOXEL_SIZE = 0.1  # metres -- downsample the scan before registration
 _STOREY_MATCH_TOLERANCE = 1.0  # metres of slack around a point-cloud storey's Z range
+
+# Fractions of each storey's own floor-to-ceiling extent (post-normalisation Z range,
+# floor at 0) rather than absolute metres -- a slice height that means "a third of the
+# way up the wall" should scale with the storey's actual height instead of assuming a
+# fixed ~2.5m ceiling. Roughly mirrors simulator.engine.DEFAULT_HEIGHTS for a typical
+# ~2.5m storey (0.3m/1.0m/1.8m -> ~0.12/0.4/0.72).
+DEFAULT_HEIGHT_FRACTIONS: tuple[float, ...] = (0.1, 0.4, 0.7)
 
 
 # --- IFC wall extraction --------------------------------------------------------------
@@ -212,6 +219,14 @@ class ISPRSDataset:
     `case_study` selects one of `"cs1"`..`"cs6"`. `root` is the local directory containing the
     case study archives and `.ifc` files (`data/ISPRS/` in this repo).
 
+    `height_fractions` are fractions of each storey's own floor-to-ceiling extent, not absolute
+    metres (see `DEFAULT_HEIGHT_FRACTIONS`) -- each `(storey, fraction)` pair is its own dataset
+    item, so `len(self) == len(self._pc_storeys) * len(height_fractions)` rather than one item
+    per storey with every height bundled into a single multi-slice `FloorPointCloud`. The ground
+    truth floor plan is a property of the storey, not of any one height slice, so it is built
+    once per storey at construction time (`_build_floor_plans`) and that same `FloorPlanGraph`
+    object -- not just an equal one -- is returned for every height-fraction item of that storey.
+
     Registration between the IFC reference model and the point cloud is computed once per case
     study at construction time (not per item) -- it's a case-study-level property, not a
     per-storey one. If it fails, every item for this case study returns `floor_plan=None`.
@@ -222,7 +237,7 @@ class ISPRSDataset:
         case_study: str,
         root: Path,
         *,
-        heights: Sequence[float] = DEFAULT_HEIGHTS,
+        height_fractions: Sequence[float] = DEFAULT_HEIGHT_FRACTIONS,
     ) -> None:
         case_study = case_study.lower()
         if case_study not in _CASE_STUDIES:
@@ -232,13 +247,24 @@ class ISPRSDataset:
         self._case_study = case_study
         self._config = _CASE_STUDIES[case_study]
         self._root = Path(root)
-        self._heights = heights
+        self._height_fractions = height_fractions
 
         self._raw_points = self._load_raw_points()
         self._pc_storeys = segment_storeys(self._raw_points)
+
+        self._transforms: list[NormalisationTransform] = []
+        self._storey_heights: list[float] = []
+        for pc_storey in self._pc_storeys:
+            normalised, transform = normalise(pc_storey)
+            self._transforms.append(transform)
+            # z_min of pc_storey maps to 0 under normalise() (translate_to_origin is
+            # per-axis), so the storey's own floor-to-ceiling extent is just z_max.
+            self._storey_heights.append(float(normalised[:, 2].max()))
+
         self._ifc_storeys = extract_walls_by_storey(self._root / self._config.ifc_filename)
         self._registration = self._register()
         self._matched_segments = self._match_storeys()
+        self._floor_plans = self._build_floor_plans()
 
     def _load_raw_points(self) -> np.ndarray:
         archive_path = self._root / self._config.archive_name
@@ -304,6 +330,24 @@ class ISPRSDataset:
             matches.append(segments)
         return matches
 
+    def _build_floor_plans(self) -> list[FloorPlanGraph | None]:
+        """The ground truth `FloorPlanGraph` for each storey, built once so every
+        height-fraction item of a storey shares the same object (per `self._matched_segments`
+        and `self._transforms`, both already storey-level and precomputed)."""
+        floor_plans: list[FloorPlanGraph | None] = []
+        for transform, segments_raw in zip(self._transforms, self._matched_segments, strict=True):
+            if not segments_raw:
+                floor_plans.append(None)
+                continue
+            normalised_segments = []
+            for segment in segments_raw:
+                x1, y1, x2, y2 = segment
+                points_3d = np.array([[x1, y1, 0.0], [x2, y2, 0.0]])
+                normalised = transform.apply(points_3d)
+                normalised_segments.append(normalised[:, :2].reshape(-1))
+            floor_plans.append(build_floor_plan_graph(normalised_segments))
+        return floor_plans
+
     def split(self, ratio: Sequence[float]) -> tuple[_ISPRSSubset, ...]:
         """Split into `len(ratio)` fixed sub-views over disjoint index ranges."""
         if not np.isclose(sum(ratio), 1.0):
@@ -319,25 +363,17 @@ class ISPRSDataset:
         return tuple(splits)
 
     def __len__(self) -> int:
-        return len(self._pc_storeys)
+        return len(self._pc_storeys) * len(self._height_fractions)
 
     def __getitem__(self, idx: int) -> tuple[FloorPointCloud, FloorPlanGraph | None]:
-        pc_storey = self._pc_storeys[idx]
-        normalised_xyz, transform = normalise(pc_storey)
-        point_cloud = preprocess(normalised_xyz, heights=self._heights)
+        n_fractions = len(self._height_fractions)
+        storey_index, fraction_index = divmod(idx, n_fractions)
 
-        segments_raw = self._matched_segments[idx]
-        floor_plan: FloorPlanGraph | None = None
-        if segments_raw:
-            normalised_segments = []
-            for segment in segments_raw:
-                x1, y1, x2, y2 = segment
-                points_3d = np.array([[x1, y1, 0.0], [x2, y2, 0.0]])
-                normalised = transform.apply(points_3d)
-                normalised_segments.append(normalised[:, :2].reshape(-1))
-            floor_plan = build_floor_plan_graph(normalised_segments)
+        normalised_xyz = self._transforms[storey_index].apply(self._pc_storeys[storey_index])
+        height = self._height_fractions[fraction_index] * self._storey_heights[storey_index]
+        point_cloud = preprocess(normalised_xyz, heights=[height])
 
-        return point_cloud, floor_plan
+        return point_cloud, self._floor_plans[storey_index]
 
     def __iter__(self):
         for idx in range(len(self)):

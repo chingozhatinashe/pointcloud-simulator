@@ -684,3 +684,31 @@ class TestISPRSDataset:
         point_cloud, floor_plan = only_split[0]
         assert isinstance(point_cloud, FloorPointCloud)
         assert isinstance(floor_plan, FloorPlanGraph)
+
+    def test_length_is_storeys_times_height_fractions(self, tmp_path):
+        rng = np.random.default_rng(34)
+        root = _isprs_room_case_study(tmp_path, rng=rng)
+
+        dataset = ISPRSDataset("cs1", root, height_fractions=(0.2, 0.5, 0.8))
+
+        assert len(dataset) == 3  # one storey * 3 height fractions
+
+    def test_ground_truth_is_same_object_across_height_fractions(self, tmp_path):
+        rng = np.random.default_rng(35)
+        root = _isprs_room_case_study(tmp_path, rng=rng)
+
+        dataset = ISPRSDataset("cs1", root, height_fractions=(0.2, 0.5, 0.8))
+        floor_plans = [dataset[idx][1] for idx in range(len(dataset))]
+
+        assert all(fp is floor_plans[0] for fp in floor_plans)
+
+    def test_height_fractions_scale_with_storey_height(self, tmp_path):
+        rng = np.random.default_rng(36)
+        root = _isprs_room_case_study(tmp_path, height=2.5, rng=rng)
+
+        dataset = ISPRSDataset("cs1", root, height_fractions=(0.2, 0.8))
+        point_cloud_low, _ = dataset[0]
+        point_cloud_high, _ = dataset[1]
+
+        assert point_cloud_low.slices[0].height == pytest.approx(0.2 * 2.5, abs=0.05)
+        assert point_cloud_high.slices[0].height == pytest.approx(0.8 * 2.5, abs=0.05)
