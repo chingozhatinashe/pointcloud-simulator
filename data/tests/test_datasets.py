@@ -656,6 +656,121 @@ def _isprs_room_case_study(
     return tmp_path
 
 
+def _build_ifc_two_storey_rooms(
+    path, *, corners=_ROOM_CORNERS, thickness=0.05, height=2.5, elevations=(0.0, 3.0)
+) -> None:
+    """Like `_build_ifc_room`, but one rectangular room per elevation in `elevations`,
+    each its own `IfcBuildingStorey` (following `test_groups_walls_by_storey`'s pattern
+    for a multi-storey model, generalised to a full 4-wall room per storey instead of
+    one wall each, so every storey gets a real closed-room floor plan)."""
+    model = ifcopenshell.api.project.create_file()
+    project = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name="Test")
+    ifcopenshell.api.unit.assign_unit(model)
+    context = ifcopenshell.api.context.add_context(model, context_type="Model")
+    body = ifcopenshell.api.context.add_context(
+        model,
+        context_type="Model",
+        context_identifier="Body",
+        target_view="MODEL_VIEW",
+        parent=context,
+    )
+    site = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name="Site")
+    building = ifcopenshell.api.root.create_entity(model, ifc_class="IfcBuilding", name="Building")
+    ifcopenshell.api.aggregate.assign_object(model, relating_object=project, products=[site])
+    ifcopenshell.api.aggregate.assign_object(model, relating_object=site, products=[building])
+
+    n = len(corners)
+    for level, elevation in enumerate(elevations):
+        storey = ifcopenshell.api.root.create_entity(
+            model, ifc_class="IfcBuildingStorey", name=f"Storey{level}"
+        )
+        storey.Elevation = elevation / ifcopenshell.util.unit.calculate_unit_scale(model)
+        ifcopenshell.api.aggregate.assign_object(model, relating_object=building, products=[storey])
+        for i in range(n):
+            p1, p2 = corners[i], corners[(i + 1) % n]
+            wall = ifcopenshell.api.root.create_entity(
+                model, ifc_class="IfcWall", name=f"L{level}Wall{i}"
+            )
+            ifcopenshell.api.spatial.assign_container(
+                model, relating_structure=storey, products=[wall]
+            )
+            ifcopenshell.api.geometry.edit_object_placement(model, product=wall)
+            representation = ifcopenshell.api.geometry.create_2pt_wall(
+                model,
+                element=wall,
+                context=body,
+                p1=p1,
+                p2=p2,
+                elevation=elevation,
+                height=height,
+                thickness=thickness,
+            )
+            ifcopenshell.api.geometry.assign_representation(
+                model, product=wall, representation=representation
+            )
+    model.write(str(path))
+
+
+def _room_points(corners, elevation, height, n_per_side, n_floor_ceiling, rng):
+    wall_points = []
+    n = len(corners)
+    for i in range(n):
+        p1, p2 = np.array(corners[i]), np.array(corners[(i + 1) % n])
+        t = rng.uniform(0.0, 1.0, n_per_side)
+        xy = p1 + t[:, None] * (p2 - p1)
+        xy += rng.normal(scale=0.01, size=xy.shape)
+        z = rng.uniform(elevation, elevation + height, n_per_side)
+        wall_points.append(np.column_stack([xy, z]))
+    wall_points = np.concatenate(wall_points)
+    floor_points = _horizontal_plane_points(
+        x_range=(corners[0][0], corners[2][0]),
+        y_range=(corners[0][1], corners[2][1]),
+        z=elevation,
+        n=n_floor_ceiling,
+        rng=rng,
+    )
+    ceiling_points = _horizontal_plane_points(
+        x_range=(corners[0][0], corners[2][0]),
+        y_range=(corners[0][1], corners[2][1]),
+        z=elevation + height,
+        n=n_floor_ceiling,
+        rng=rng,
+    )
+    return np.concatenate([wall_points, floor_points, ceiling_points])
+
+
+def _isprs_two_storey_case_study(
+    tmp_path, *, corners=_ROOM_CORNERS, thickness=0.05, height=2.5, elevations=(0.0, 3.0), rng
+):
+    """Two stacked rooms -- the upper one scanned far more sparsely than the lower one,
+    mirroring the real ISPRS CaseStudy2 bug this regresses against: a genuine upper
+    storey whose point density sits near the noise floor (there, its top storey was
+    apparently glimpsed through a stairwell rather than walked and scanned directly).
+    `data.preprocessing.segment_storeys`'s point-density heuristic cannot reliably
+    separate a storey that sparse from a genuine gap without also producing false
+    positives on genuinely single-storey scans (see `data/datasets/isprs.py`'s module
+    docstring) -- `ISPRSDataset` must segment by IFC elevation instead."""
+    ifc_path = tmp_path / "CaseStudy1_TUB1_IFC.ifc"
+    _build_ifc_two_storey_rooms(
+        ifc_path, corners=corners, thickness=thickness, height=height, elevations=elevations
+    )
+
+    lower = _room_points(
+        corners, elevations[0], height, n_per_side=400, n_floor_ceiling=200, rng=rng
+    )
+    upper = _room_points(corners, elevations[1], height, n_per_side=15, n_floor_ceiling=5, rng=rng)
+    points = np.concatenate([lower, upper])
+
+    archive_path = tmp_path / "CaseStudy1_TUB1.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        buffer = io.StringIO()
+        np.savetxt(buffer, points, fmt="%.6f")
+        archive.writestr(
+            "CaseStudy1/PointCloud_cs1_dec_x-y-z-localtime6precision.txt", buffer.getvalue()
+        )
+    return tmp_path
+
+
 class TestISPRSDataset:
     def test_getitem_returns_point_cloud_and_registered_floor_plan(self, tmp_path):
         rng = np.random.default_rng(30)
@@ -743,3 +858,24 @@ class TestISPRSDataset:
 
         assert point_cloud_low.slices[0].height == pytest.approx(0.2 * 2.5, abs=0.05)
         assert point_cloud_high.slices[0].height == pytest.approx(0.8 * 2.5, abs=0.05)
+
+    def test_segments_storeys_by_ifc_elevation_even_when_upper_storey_is_sparse(self, tmp_path):
+        # regression test for the real ISPRS CaseStudy2 bug (see _isprs_two_storey_case_study
+        # and data/datasets/isprs.py's module docstring): a genuine upper storey scanned so
+        # sparsely its density sits near the noise floor must still be recognised as its own
+        # storey with correct ground truth, since segmentation now comes from registered IFC
+        # elevations rather than point density
+        rng = np.random.default_rng(37)
+        root = _isprs_two_storey_case_study(tmp_path, rng=rng)
+
+        dataset = ISPRSDataset("cs1", root, height_fractions=(0.5,))
+
+        assert len(dataset) == 2  # 2 storeys * 1 height fraction
+        lower_point_cloud, lower_floor_plan = dataset[0]
+        upper_point_cloud, upper_floor_plan = dataset[1]
+
+        assert lower_point_cloud.points_3d.shape[0] > upper_point_cloud.points_3d.shape[0]
+        assert lower_floor_plan is not None and len(lower_floor_plan.segments) == 4
+        assert upper_floor_plan is not None and len(upper_floor_plan.segments) == 4
+        # each storey's ground truth is its own room, not shared with the other storey
+        assert lower_floor_plan is not upper_floor_plan

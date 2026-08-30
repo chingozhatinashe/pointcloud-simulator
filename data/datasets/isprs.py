@@ -20,6 +20,22 @@ elevation datum). Registration corrects that Z offset and polishes the residual 
 constrained ICP pass; if the residual stays large, every item for that case study gets
 `floor_plan=None` rather than a silently wrong graph.
 
+Per-storey point-cloud segmentation uses each IFC `IfcBuildingStorey`'s own registered
+elevation as the storey boundary, not `data.preprocessing.segment_storeys`'s point-density
+histogram. That density-based heuristic is the right (only) choice when there's no ground
+truth to segment against (3DSES), but it's the wrong tool here: CaseStudy2's top storey is
+real (its IFC model declares exactly 3 `IfcBuildingStorey` entities, confirmed against
+CaseStudy2_TUB2_IFC.ifc) but scanned so sparsely -- apparently glimpsed through a stairwell
+opening rather than walked and scanned directly -- that its point density sits at the noise
+floor, indistinguishable from a genuine gap by any density-based valley test without also
+producing false positives on the single-storey case studies (CaseStudy1's whole IFC model is
+one `IfcBuildingStorey`, and a naive threshold that catches CaseStudy2's sparse top storey
+also splits CaseStudy1 into two on nothing more than its floor scan being denser than its
+walls). Falling back to `segment_storeys` only when registration fails (`_registration is
+None`) is safe precisely because floor_plan is `None` for every item in that case anyway --
+there's no elevation ground truth to segment against, so getting the storey count "wrong"
+there does not silently produce mismatched ground truth.
+
 Note on `ifcopenshell.geom`: `create_shape()` already returns world-coordinate vertices in
 metres regardless of the file's declared length unit -- do not also multiply by
 `ifcopenshell.util.unit.calculate_unit_scale()`, which applies only to *raw attribute values*
@@ -52,7 +68,6 @@ from simulator.engine import FloorPointCloud
 logger = logging.getLogger(__name__)
 
 DEFAULT_REGISTRATION_VOXEL_SIZE = 0.1  # metres -- downsample the scan before registration
-_STOREY_MATCH_TOLERANCE = 1.0  # metres of slack around a point-cloud storey's Z range
 
 # Fractions of each storey's own floor-to-ceiling extent (post-normalisation Z range,
 # floor at 0) rather than absolute metres -- a slice height that means "a third of the
@@ -229,7 +244,10 @@ class ISPRSDataset:
 
     Registration between the IFC reference model and the point cloud is computed once per case
     study at construction time (not per item) -- it's a case-study-level property, not a
-    per-storey one. If it fails, every item for this case study returns `floor_plan=None`.
+    per-storey one. If it fails, every item for this case study returns `floor_plan=None`, and
+    storeys fall back to being segmented from point density (`segment_storeys`) rather than IFC
+    elevations, since there is then no registered elevation to segment against (see module
+    docstring).
     """
 
     def __init__(
@@ -250,7 +268,14 @@ class ISPRSDataset:
         self._height_fractions = height_fractions
 
         self._raw_points = self._load_raw_points()
-        self._pc_storeys = segment_storeys(self._raw_points)
+        self._ifc_storeys = extract_walls_by_storey(self._root / self._config.ifc_filename)
+        self._registration = self._register()
+
+        if self._registration is not None:
+            self._pc_storeys, self._storey_wall_segments = self._segment_storeys_by_ifc_elevation()
+        else:
+            self._pc_storeys = segment_storeys(self._raw_points)
+            self._storey_wall_segments = [None] * len(self._pc_storeys)
 
         self._transforms: list[NormalisationTransform] = []
         self._storey_heights: list[float] = []
@@ -261,9 +286,6 @@ class ISPRSDataset:
             # per-axis), so the storey's own floor-to-ceiling extent is just z_max.
             self._storey_heights.append(float(normalised[:, 2].max()))
 
-        self._ifc_storeys = extract_walls_by_storey(self._root / self._config.ifc_filename)
-        self._registration = self._register()
-        self._matched_segments = self._match_storeys()
         self._floor_plans = self._build_floor_plans()
 
     def _load_raw_points(self) -> np.ndarray:
@@ -297,50 +319,53 @@ class ISPRSDataset:
             return None
         return result
 
-    def _match_storeys(self) -> list[list[np.ndarray] | None]:
-        """For each detected point-cloud storey, the matching IFC storey's registered wall
-        segments (2D, in the point cloud's raw frame), or None if unmatched/unregistered."""
-        if self._registration is None:
-            return [None] * len(self._pc_storeys)
-
+    def _segment_storeys_by_ifc_elevation(self) -> tuple[list[np.ndarray], list[list[np.ndarray]]]:
+        """Partition `self._raw_points` into per-storey arrays using each IFC storey's own
+        registered floor elevation as the boundary, and pair each with that storey's registered
+        wall segments (2D, in the point cloud's raw frame) -- see module docstring for why this
+        replaces point-density-based segmentation here. Storeys are 1:1 with IFC storeys sorted
+        by elevation ascending: no elevation-matching/tolerance step is needed, since every
+        boundary comes directly from the model rather than being inferred and then matched.
+        Only called when `self._registration` is not None.
+        """
         registered_storeys = []
         for storey in self._ifc_storeys.values():
-            registered_elevation = self._registration.apply(
-                np.array([[0.0, 0.0, storey["elevation"]]])
-            )[0, 2]
+            elevation = float(
+                self._registration.apply(np.array([[0.0, 0.0, storey["elevation"]]]))[0, 2]
+            )
             segments = [
                 self._registration.apply(wall["centerline"])[:, :2].reshape(-1)
                 for wall in storey["walls"]
             ]
-            registered_storeys.append((registered_elevation, segments))
+            registered_storeys.append((elevation, segments))
+        registered_storeys.sort(key=lambda item: item[0])
 
-        matches: list[list[np.ndarray] | None] = []
-        for pc_storey in self._pc_storeys:
-            z_min, z_max = pc_storey[:, 2].min(), pc_storey[:, 2].max()
-            candidates = [
-                (elevation, segments)
-                for elevation, segments in registered_storeys
-                if z_min - _STOREY_MATCH_TOLERANCE <= elevation <= z_max + _STOREY_MATCH_TOLERANCE
-            ]
-            if not candidates:
-                matches.append(None)
-                continue
-            midpoint = (z_min + z_max) / 2
-            _, segments = min(candidates, key=lambda c: abs(c[0] - midpoint))
-            matches.append(segments)
-        return matches
+        z = self._raw_points[:, 2]
+        pc_storeys = []
+        wall_segments = []
+        for index, (elevation, segments) in enumerate(registered_storeys):
+            # the lowest/highest storeys absorb anything below/above their own elevation too,
+            # in case the scan dips below or rises above the modelled floor elevation slightly
+            lower = elevation if index > 0 else -np.inf
+            upper = (
+                registered_storeys[index + 1][0] if index + 1 < len(registered_storeys) else np.inf
+            )
+            pc_storeys.append(self._raw_points[(z >= lower) & (z < upper)])
+            wall_segments.append(segments)
+        return pc_storeys, wall_segments
 
     def _build_floor_plans(self) -> list[FloorPlanGraph | None]:
         """The ground truth `FloorPlanGraph` for each storey, built once so every
-        height-fraction item of a storey shares the same object (per `self._matched_segments`
-        and `self._transforms`, both already storey-level and precomputed)."""
+        height-fraction item of a storey shares the same object (per
+        `self._storey_wall_segments` and `self._transforms`, both already storey-level and
+        precomputed)."""
         floor_plans: list[FloorPlanGraph | None] = []
-        for transform, segments_raw in zip(self._transforms, self._matched_segments, strict=True):
-            if not segments_raw:
+        for transform, segments in zip(self._transforms, self._storey_wall_segments, strict=True):
+            if not segments:
                 floor_plans.append(None)
                 continue
             normalised_segments = []
-            for segment in segments_raw:
+            for segment in segments:
                 x1, y1, x2, y2 = segment
                 points_3d = np.array([[x1, y1, 0.0], [x2, y2, 0.0]])
                 normalised = transform.apply(points_3d)
