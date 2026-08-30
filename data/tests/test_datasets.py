@@ -223,7 +223,9 @@ class TestThreeDSESDataset:
         rng = np.random.default_rng(5)
         _make_gold_zip(tmp_path, rng)
 
-        dataset = ThreeDSESDataset("gold", tmp_path)
+        # a single height fraction keeps this a direct storey count, independent of
+        # the default height_fractions multiplier tested separately below
+        dataset = ThreeDSESDataset("gold", tmp_path, height_fractions=(0.5,))
 
         # S1 (single storey) + S2 (two storeys) = 3 items
         assert len(dataset) == 3
@@ -262,6 +264,35 @@ class TestThreeDSESDataset:
     def test_unknown_variant_raises(self, tmp_path):
         with pytest.raises(ValueError):
             ThreeDSESDataset("platinum", tmp_path)
+
+    def test_length_is_storeys_times_height_fractions(self, tmp_path):
+        rng = np.random.default_rng(9)
+        _make_gold_zip(tmp_path, rng)
+
+        dataset = ThreeDSESDataset("gold", tmp_path, height_fractions=(0.2, 0.5, 0.8))
+
+        # S1 (single storey) + S2 (two storeys) = 3 storeys * 3 height fractions
+        assert len(dataset) == 9
+
+    def test_ground_truth_is_same_object_across_height_fractions(self, tmp_path):
+        rng = np.random.default_rng(10)
+        _make_gold_zip(tmp_path, rng)
+
+        dataset = ThreeDSESDataset("gold", tmp_path, height_fractions=(0.2, 0.5, 0.8))
+        floor_plans = [dataset[idx][1] for idx in range(3)]  # S1's 3 height-fraction items
+
+        assert all(fp is floor_plans[0] for fp in floor_plans)
+
+    def test_height_fractions_scale_with_storey_height(self, tmp_path):
+        rng = np.random.default_rng(11)
+        _make_gold_zip(tmp_path, rng)  # S1 is a single storey spanning z in [0.0, 2.5]
+
+        dataset = ThreeDSESDataset("gold", tmp_path, height_fractions=(0.2, 0.8))
+        point_cloud_low, _ = dataset[0]
+        point_cloud_high, _ = dataset[1]
+
+        assert point_cloud_low.slices[0].height == pytest.approx(0.2 * 2.5, abs=0.05)
+        assert point_cloud_high.slices[0].height == pytest.approx(0.8 * 2.5, abs=0.05)
 
 
 def _make_point_cloud(seed: int, size: float = 3.0) -> FloorPointCloud:

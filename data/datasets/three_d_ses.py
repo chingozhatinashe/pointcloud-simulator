@@ -22,10 +22,15 @@ are line-fitted after projecting the storey's *entire* Z range onto the XY plane
 not from a single height slice. A single slice would make the fitted ground truth
 depend on an arbitrary height choice, and would be vulnerable to whatever happens to
 occlude that particular band (a window, a door, furniture) even though the wall is
-solid at other heights. `self._heights` (default `simulator.engine.DEFAULT_HEIGHTS`)
+solid at other heights. `self._height_fractions` (default `DEFAULT_HEIGHT_FRACTIONS`)
 is a separate concept -- it controls what heights `FloorPointCloud`'s own slices are
 taken at, mirroring the Simulator's multi-height LiDAR sweep, and has no bearing on
-ground truth construction.
+ground truth construction. Each fraction is scaled by the storey's own floor-to-ceiling
+extent rather than being an absolute height, and each `(storey, fraction)` pair is its
+own dataset item -- `len(self) == len(self._items) * len(height_fractions)` -- so every
+height-fraction item of a storey must share the *same* `FloorPlanGraph` object rather
+than a freshly rebuilt (RANSAC is not deterministic-by-construction) equal one; see
+`_load_storey`.
 
 A `.npy` "scan" is one scanner acquisition, not necessarily one storey -- some scans
 (observed directly on the locally-downloaded test-area files) span multiple floors,
@@ -48,7 +53,7 @@ from data.datasets.wall_fitting import build_floor_plan_graph, fit_wall_segments
 from data.normalisation import normalise
 from data.preprocessing import preprocess, segment_storeys
 from representation.floor_plan import FloorPlanGraph
-from simulator.engine import DEFAULT_HEIGHTS, FloorPointCloud
+from simulator.engine import FloorPointCloud
 
 _VARIANT_ARCHIVES: dict[str, tuple[str, str | None]] = {
     "gold": ("3DSES.zip", "Gold"),
@@ -58,6 +63,12 @@ _VARIANT_ARCHIVES: dict[str, tuple[str, str | None]] = {
 }
 
 _LABELED_VARIANTS = frozenset({"gold", "silver", "bronze"})
+
+# Fractions of each storey's own floor-to-ceiling extent (post-normalisation Z range,
+# floor at 0) rather than absolute metres -- see the module docstring. Roughly mirrors
+# simulator.engine.DEFAULT_HEIGHTS for a typical ~2.5m storey (0.3m/1.0m/1.8m ->
+# ~0.12/0.4/0.72).
+DEFAULT_HEIGHT_FRACTIONS: tuple[float, ...] = (0.1, 0.4, 0.7)
 
 
 @dataclass(frozen=True)
@@ -86,6 +97,15 @@ class ThreeDSESDataset:
     storey boundaries -- for `bronze` (42 large scans) this can take a while, since
     zip members are compressed and can't be memory-mapped; there is no eager point
     loading beyond that.
+
+    `height_fractions` -- see the module docstring -- makes each `(storey, fraction)`
+    pair its own dataset item. `_load_storey` caches the most recently loaded storey's
+    normalised points, height, and ground-truth `FloorPlanGraph` (a size-1 cache, not a
+    full dataset cache, to keep memory bounded to one storey's raw points at a time,
+    matching this loader's streamed on-demand design above) so that the
+    `len(height_fractions)` consecutive `__getitem__` calls for the same storey --
+    indices are storey-major, so this is the normal access pattern -- share the same
+    `FloorPlanGraph` object and skip re-reading/re-segmenting/re-fitting.
     """
 
     def __init__(
@@ -93,7 +113,7 @@ class ThreeDSESDataset:
         variant: str,
         root: Path,
         *,
-        heights: Sequence[float] = DEFAULT_HEIGHTS,
+        height_fractions: Sequence[float] = DEFAULT_HEIGHT_FRACTIONS,
         _items: Sequence[_ScanRef] | None = None,
     ) -> None:
         if variant not in _VARIANT_ARCHIVES:
@@ -105,9 +125,14 @@ class ThreeDSESDataset:
         archive_name, folder = _VARIANT_ARCHIVES[variant]
         self._zip_path = self._root / archive_name
         self._folder = folder
-        self._heights = heights
+        self._height_fractions = height_fractions
 
         self._items = list(_items) if _items is not None else self._build_index()
+
+        self._cache_item_index: int | None = None
+        self._cache_normalised_xyz: np.ndarray | None = None
+        self._cache_storey_height: float | None = None
+        self._cache_floor_plan: FloorPlanGraph | None = None
 
     def _member_names(self) -> list[str]:
         with zipfile.ZipFile(self._zip_path) as archive:
@@ -143,7 +168,7 @@ class ThreeDSESDataset:
                 ThreeDSESDataset(
                     self._variant,
                     self._root,
-                    heights=self._heights,
+                    height_fractions=self._height_fractions,
                     _items=self._items[start:boundary],
                 )
             )
@@ -151,17 +176,27 @@ class ThreeDSESDataset:
         return tuple(splits)
 
     def __len__(self) -> int:
-        return len(self._items)
+        return len(self._items) * len(self._height_fractions)
 
-    def __getitem__(self, idx: int) -> tuple[FloorPointCloud, FloorPlanGraph | None]:
-        item = self._items[idx]
+    def _load_storey(self, item_index: int) -> tuple[np.ndarray, float, FloorPlanGraph | None]:
+        """Normalised points, floor-to-ceiling height, and ground truth for one storey.
+
+        See the class docstring -- this is a size-1 cache keyed by `item_index`, not a
+        full dataset cache.
+        """
+        if self._cache_item_index == item_index:
+            return self._cache_normalised_xyz, self._cache_storey_height, self._cache_floor_plan
+
+        item = self._items[item_index]
         raw = _read_member(self._zip_path, item.member_name)
         storeys = segment_storeys(np.asarray(raw, dtype=np.float64))
         storey_points = storeys[item.storey_index]
 
         xyz = storey_points[:, :3]
         normalised_xyz, _transform = normalise(xyz)
-        point_cloud = preprocess(normalised_xyz, heights=self._heights)
+        # z_min of xyz maps to 0 under normalise() (translate_to_origin is per-axis),
+        # so the storey's own floor-to-ceiling extent is just z_max.
+        storey_height = float(normalised_xyz[:, 2].max())
 
         floor_plan: FloorPlanGraph | None = None
         if self._variant in _LABELED_VARIANTS:
@@ -173,6 +208,20 @@ class ThreeDSESDataset:
             wall_points_2d = np.asarray(normalised_xyz[labels == wall_label][:, :2])
             raw_segments = fit_wall_segments(wall_points_2d)
             floor_plan = build_floor_plan_graph(raw_segments)
+
+        self._cache_item_index = item_index
+        self._cache_normalised_xyz = normalised_xyz
+        self._cache_storey_height = storey_height
+        self._cache_floor_plan = floor_plan
+        return normalised_xyz, storey_height, floor_plan
+
+    def __getitem__(self, idx: int) -> tuple[FloorPointCloud, FloorPlanGraph | None]:
+        n_fractions = len(self._height_fractions)
+        item_index, fraction_index = divmod(idx, n_fractions)
+
+        normalised_xyz, storey_height, floor_plan = self._load_storey(item_index)
+        height = self._height_fractions[fraction_index] * storey_height
+        point_cloud = preprocess(normalised_xyz, heights=[height])
 
         return point_cloud, floor_plan
 
