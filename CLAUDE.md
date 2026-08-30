@@ -146,10 +146,11 @@ bim_inference/
 │   ├── 02_simulator_demo.ipynb        # Forward model demo; sim-to-real comparison
 │   ├── 03_prior_samples.ipynb         # Sampling from P(G); prior visualisation
 │   ├── 04_rjmcmc_synthetic.ipynb      # RJMCMC on synthetic data; recovery experiment
-│   ├── 05_smc_comparison.ipynb        # SMC vs RJMCMC comparison
-│   ├── 06_abc_demo.ipynb              # ABC inference walkthrough
-│   ├── 07_sbi_training.ipynb          # SBI training curves and posterior quality
-│   └── 08_real_data.ipynb             # Full pipeline on real LiDAR scan
+│   ├── 05_create_benchmark_datasets.ipynb  # Cache 3DSES/ISPRS benchmark items to local HDF5
+│   ├── 06_smc_comparison.ipynb        # SMC vs RJMCMC comparison
+│   ├── 07_abc_demo.ipynb              # ABC inference walkthrough
+│   ├── 08_sbi_training.ipynb          # SBI training curves and posterior quality
+│   └── 09_real_data.ipynb             # Full pipeline on real LiDAR scan
 │
 └── assets/                            # Static assets
     └── test_data/                     # Small real and synthetic scans for unit tests
