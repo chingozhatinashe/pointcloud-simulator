@@ -37,20 +37,33 @@ def segment_storeys(
 
     Builds a histogram of Z values; peaks correspond to floor and ceiling surfaces,
     and a "valley" -- a contiguous run of bins whose count falls below
-    `valley_fraction` of the histogram's peak count, bounded by occupied bins on
-    both sides -- marks a storey boundary. Storey boundaries are placed at the
-    z-midpoint of each qualifying valley. Returns a single-element list (all points)
-    when no valley is found, e.g. for a single-storey building.
+    `valley_fraction` of the histogram's *typical* occupied-bin count, bounded by
+    occupied bins on both sides -- marks a storey boundary. The threshold is scaled
+    off the median bin count rather than the single tallest bin: a real single-storey
+    scan routinely has one or two extreme-density bins (a densely-scanned floor or
+    ceiling plane, easily 10x the surrounding wall density), and thresholding against
+    that peak makes the entire rest of the room -- genuinely continuous wall
+    coverage, just sparser than the floor -- read as "unoccupied", producing a
+    spurious extra storey. The median is far more robust to that: an occupied
+    single-storey histogram is mostly wall-density bins, so the peak floor/ceiling
+    bin(s) barely move it, while a real inter-storey gap stays a small enough
+    fraction of the bins not to pull the median down into the gap itself.
+
+    Returns a single-element list (all points) when no valley is found, e.g. for a
+    single-storey building. Points falling strictly inside a qualifying valley's
+    `(start, end)` span are dropped rather than assigned to either neighbouring
+    storey -- they're the ambiguous, near-empty band between two storeys, not part
+    of either one.
     """
     z = points[:, 2]
     z_min, z_max = float(z.min()), float(z.max())
     num_bins = max(int(np.ceil((z_max - z_min) / bin_size)), 1)
     counts, edges = np.histogram(z, bins=num_bins, range=(z_min, z_max))
 
-    threshold = valley_fraction * counts.max()
+    threshold = valley_fraction * np.median(counts)
     occupied = counts > threshold
 
-    boundaries = []
+    boundaries: list[tuple[float, float]] = []
     index = 0
     num_edges = len(counts)
     while index < num_edges:
@@ -62,17 +75,18 @@ def segment_storeys(
             index += 1
         end = index  # exclusive
         if start > 0 and end < num_edges:  # a genuine valley has occupied bins on both sides
-            boundaries.append((edges[start] + edges[end]) / 2)
+            boundaries.append((float(edges[start]), float(edges[end])))
 
     if not boundaries:
         return [points]
 
     storeys = []
-    lower = -np.inf
-    for boundary in [*boundaries, np.inf]:
-        mask = (z >= lower) & (z < boundary)
+    lower = z_min
+    for start, end in boundaries:
+        mask = (z >= lower) & (z < start)
         storeys.append(points[mask])
-        lower = boundary
+        lower = end
+    storeys.append(points[(z >= lower) & (z <= z_max)])
     return storeys
 
 
